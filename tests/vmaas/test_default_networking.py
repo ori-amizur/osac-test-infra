@@ -70,10 +70,12 @@ def _verify_default_networking(*, k8s: K8sClient, private_grpc: GRPCClient, tena
         wait_for_grpc_tenant_condition(grpc=private_grpc, name=tenant_name, condition_type="DefaultNetworkingReady")
     except TimeoutError:
         reason = private_grpc.get_tenant_condition_reason(name=tenant_name, condition_type="DefaultNetworkingReady")
-        pytest.skip(
-            f"DefaultNetworkingReady did not reach True for {tenant_name} (reason={reason!r})"
-            " — default networking not provisioned in this environment"
-        )
+        if reason in ("NoDefaultNetworking", "ResourcesPending"):
+            pytest.skip(
+                f"DefaultNetworkingReady not ready for {tenant_name} (reason={reason!r})"
+                " — environment not configured for default networking"
+            )
+        raise  # configured but broken — fail the test so the regression is visible
 
     reason = private_grpc.get_tenant_condition_reason(name=tenant_name, condition_type="DefaultNetworkingReady")
     if reason == "NoDefaultNetworking":
