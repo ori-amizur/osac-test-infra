@@ -117,10 +117,23 @@
     src: "{{ osac_installer_dir }}/{{ osac_values_file }}"
   register: _values_raw
 
+# caas-ci remains k8s_only for its shared workflow. This ephemeral Netris
+# environment explicitly registers Netris and selects it as the default class.
 - name: Build values overrides
   ansible.builtin.set_fact:
     _values_overrides: >-
       {{ {'cliImage': _ocp_cli_image.stdout | trim,
+          'global': {'expertOverrides': {'networkClass': true}},
+          'networkClass': {'enabled': true,
+              'title': 'CaaS Netris CI',
+              'description': 'Ephemeral Netris-backed networking for CaaS E2E',
+              'fabricManager': 'netris',
+              'isDefault': true},
+          'operator': {'networkManagers': {'fabricManagers': {'netris': {
+              'enabled': true,
+              'description': 'Netris SDN fabric manager for CaaS E2E',
+              'capabilities': ['ipv4']
+          }}}},
           'bundledPostgres': {'enabled': true},
           'lvms': {'enabled': true, 'channel': 'stable-' + ocp_version},
           'metallb': {'enabled': true},

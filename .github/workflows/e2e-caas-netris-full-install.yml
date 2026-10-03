@@ -85,6 +85,11 @@ on:
         required: false
         type: string
         default: "[]"
+      osac-test-marker:
+        description: "pytest marker expression for the OSAC suite cloned from osac-repo/osac-branch"
+        required: false
+        type: string
+        default: "requires_caas_fabric"
       test-infra-repository:
         description: "Repository to checkout for actions and scripts (for cross-repo calls)"
         required: false
@@ -259,17 +264,15 @@ jobs:
 
   e2e:
     needs: [provision, push-secrets]
-    # 360m (6h): the real CaaS/Netris flow's own Prow step timeouts summed
-    # to lab-setup(30m)+lab-deploy(90m)+lab-snapshot(3h)+caas-setup(45m)+
-    # caas-deploy(90m) -- several hours in the worst case. Self-hosted
-    # runners aren't bound by GitHub-hosted runners' 6h job cap, so this is
-    # just an explicit upper bound, not a platform limit.
+    # The Netris lab flow can take several hours, and the serial OSAC CaaS
+    # lifecycle tests each provision and remove a hosted cluster. This is an
+    # explicit upper bound for the self-hosted ephemeral runner.
     runs-on: ${{ needs.provision.outputs.runner-label }}
-    timeout-minutes: 360
+    timeout-minutes: 840
     permissions:
       contents: read
     outputs:
-      result: ${{ steps.deploy-caas.outcome == 'success' && 'PASSED' || 'FAILED' }}
+      result: ${{ steps.osac-fabric-tests.outcome == 'success' && steps.deploy-caas.outcome == 'success' && 'PASSED' || 'FAILED' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -521,6 +524,84 @@ jobs:
           EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
         run: make setup-suite INFRA=netris SUITE=caas EXTRA_VARS="${EXTRA_VARS}"
 
+      # Run before the baseline cluster below so its worker NodePools do not
+      # consume the BMaaS agents needed by the OSAC lifecycle assertions.
+      - name: Create test adapter route for metering tests
+        id: metering-adapter
+        env:
+          KUBECONFIG: /root/.kube/config
+          OSAC_NAMESPACE: osac-e2e-ci
+        shell: bash
+        run: |
+          SVC_NAME=$(oc get svc -n "${OSAC_NAMESPACE}" \
+            -l app.kubernetes.io/component=echo-adapter \
+            -o jsonpath='{.items[0].metadata.name}')
+          if [ -z "${SVC_NAME}" ]; then
+            echo "::error::No echo-adapter Service found in namespace ${OSAC_NAMESPACE}"
+            exit 1
+          fi
+          if ! oc get route metering-test-adapter -n "${OSAC_NAMESPACE}" >/dev/null 2>&1; then
+            oc expose "svc/${SVC_NAME}" -n "${OSAC_NAMESPACE}" --name=metering-test-adapter
+          fi
+          ROUTE_HOST=$(oc get route metering-test-adapter -n "${OSAC_NAMESPACE}" -o jsonpath='{.spec.host}')
+          if [ -z "${ROUTE_HOST}" ]; then
+            echo "::error::Metering test adapter route has no host"
+            exit 1
+          fi
+          echo "url=http://${ROUTE_HOST}" >> "$GITHUB_OUTPUT"
+
+      - name: Run OSAC CaaS fabric pytest cases
+        id: osac-fabric-tests
+        timeout-minutes: 600
+        env:
+          OSAC_REPO: ${{ inputs.osac-repo || 'https://github.com/osac-project/osac.git' }}
+          OSAC_BRANCH: ${{ inputs.osac-branch || 'main' }}
+          OSAC_TEST_MARKER: ${{ inputs.osac-test-marker }}
+          KUBECONFIG: /root/.kube/config
+          OSAC_NAMESPACE: osac-e2e-ci
+          OSAC_PULL_SECRET_PATH: /root/pull-secret
+          OSAC_SSH_PUBLIC_KEY_PATH: /root/.ssh/id_rsa.pub
+          METERING_ADAPTER_URL: ${{ steps.metering-adapter.outputs.url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          OSAC_SRC="$RUNNER_TEMP/osac-under-test"
+          TEST_OUTPUT="$RUNNER_TEMP/osac-test-output"
+          mkdir -p "$OSAC_SRC" "$TEST_OUTPUT" "$HOME/.local/bin"
+          git -C "$OSAC_SRC" init
+          git -C "$OSAC_SRC" remote add origin "$OSAC_REPO"
+          git -C "$OSAC_SRC" fetch --depth 1 origin "$OSAC_BRANCH"
+          git -C "$OSAC_SRC" checkout --detach FETCH_HEAD
+
+          curl --retry 5 --retry-delay 2 -LsSf https://astral.sh/uv/install.sh \
+            | env UV_INSTALL_DIR="$HOME/.local/bin" sh
+          curl --retry 5 --retry-delay 2 -Lsf \
+            https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | tar xz --no-same-owner -C "$HOME/.local/bin" grpcurl
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          uv python install 3.11
+          cd "$OSAC_SRC"
+          uv sync --all-groups --python 3.11
+
+          # This helper derives fulfillment/Keycloak endpoints from the live
+          # cluster and adds route hosts when lab wildcard DNS is unavailable.
+          source tests/e2e/setup-env.sh
+          if ! getent ahostsv4 "${METERING_ADAPTER_URL#http://}" >/dev/null 2>&1; then
+            ROUTE_HOST="${METERING_ADAPTER_URL#http://}"
+            CLUSTER_DOMAIN=$(oc get ingress.config.openshift.io cluster -o jsonpath='{.spec.domain}')
+            INGRESS_IP=$(getent ahostsv4 "api.${CLUSTER_DOMAIN}" | awk 'NR==1 {print $1}')
+            if [ -z "$INGRESS_IP" ]; then
+              echo "::error::Cannot resolve metering route ${ROUTE_HOST} or ingress IP for api.${CLUSTER_DOMAIN}"
+              exit 1
+            fi
+            echo "$INGRESS_IP $ROUTE_HOST" | sudo tee -a /etc/hosts >/dev/null
+          fi
+
+          uv run pytest tests/e2e/caas/ -m "$OSAC_TEST_MARKER" -n 0 \
+            --junitxml="$TEST_OUTPUT/junit.xml" \
+            --log-file="$TEST_OUTPUT/e2e.log" -v
+
       - name: Deploy CaaS cluster
         id: deploy-caas
         timeout-minutes: 90
@@ -563,6 +644,15 @@ jobs:
         with:
           name: caas-netris-artifacts
           path: infra/netris/logs/
+          if-no-files-found: ignore
+
+      - name: Upload OSAC CaaS pytest results
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: caas-netris-osac-pytest-${{ github.run_id }}
+          path: ${{ runner.temp }}/osac-test-output/
           if-no-files-found: ignore
 
       # Not part of the formal backend contract (infra/contract.md's target
