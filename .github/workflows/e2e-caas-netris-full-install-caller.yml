@@ -39,7 +39,22 @@ on:
         required: false
         default: ""
       osac-branch:
-        description: "Branch, tag, or commit of the osac mono-repo to clone -- empty means main"
+        description: "Branch, tag, or commit of the OSAC mono-repo to deploy and test -- empty means main"
+        required: false
+        default: ""
+      components:
+        description: >-
+          Optional JSON array of OSAC components to build from source and load
+          onto the cluster. Set repo/ref to the same OSAC PR repository/ref
+          when testing implementation changes; empty builds no PR components.
+        required: false
+        default: "[]"
+      test-marker:
+        description: "pytest -m marker expression; empty runs all CaaS tests (default: requires_caas_fabric)"
+        required: false
+        default: "requires_caas_fabric"
+      test-filter:
+        description: "Optional pytest -k filter expression"
         required: false
         default: ""
 
@@ -59,3 +74,6 @@ jobs:
       osac-aap-ee-image: ${{ inputs.osac-aap-ee-image || '' }}
       osac-repo: ${{ inputs.osac-repo || '' }}
       osac-branch: ${{ inputs.osac-branch || '' }}
+      components: ${{ inputs.components || '[]' }}
+      test-marker: ${{ inputs.test-marker }}
+      test-filter: ${{ inputs.test-filter }}

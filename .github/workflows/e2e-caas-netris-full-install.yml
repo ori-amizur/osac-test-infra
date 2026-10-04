@@ -85,6 +85,16 @@ on:
         required: false
         type: string
         default: "[]"
+      test-marker:
+        description: "pytest -m marker expression; empty runs all CaaS tests (default: requires_caas_fabric)"
+        required: false
+        type: string
+        default: "requires_caas_fabric"
+      test-filter:
+        description: "Optional pytest -k filter expression"
+        required: false
+        type: string
+        default: ""
       test-infra-repository:
         description: "Repository to checkout for actions and scripts (for cross-repo calls)"
         required: false
@@ -289,23 +299,56 @@ jobs:
 
   e2e:
     needs: [provision, push-secrets]
-    # 360m (6h): the real CaaS/Netris flow's own Prow step timeouts summed
-    # to lab-setup(30m)+lab-deploy(90m)+lab-snapshot(3h)+caas-setup(45m)+
-    # caas-deploy(90m) -- several hours in the worst case. Self-hosted
-    # runners aren't bound by GitHub-hosted runners' 6h job cap, so this is
-    # just an explicit upper bound, not a platform limit.
+    # The capped install/setup steps can sum to 6h15; reserve the remainder
+    # for the serial CaaS fabric scenarios. This 10h ceiling is an initial
+    # budget and should be tuned from the first successful run's duration.
     runs-on: ${{ needs.provision.outputs.runner-label }}
-    timeout-minutes: 360
+    timeout-minutes: 600
     permissions:
       contents: read
     outputs:
-      result: ${{ steps.deploy-caas.outcome == 'success' && 'PASSED' || 'FAILED' }}
+      result: ${{ steps.deploy-caas.outcome == 'success' && steps.test.outcome == 'success' && 'PASSED' || 'FAILED' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ${{ inputs.test-infra-repository || github.repository }}
           persist-credentials: false
+
+      - name: Overlay tests from OSAC mono-repo
+        env:
+          OSAC_REPO: ${{ inputs.osac-repo }}
+          OSAC_REF: ${{ inputs.osac-branch }}
+        run: |
+          OSAC_REPO="${OSAC_REPO:-https://github.com/osac-project/osac.git}"
+          OSAC_REF="${OSAC_REF:-main}"
+
+          if [[ ! "${OSAC_REPO}" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(\.git)?$ ]]; then
+            echo "::error::osac-repo must be an https://github.com/owner/repo[.git] URL"
+            exit 1
+          fi
+          if [[ ! "${OSAC_REF}" =~ ^[A-Za-z0-9._/@-]+$ ]] \
+            || ! git check-ref-format --branch "${OSAC_REF}" >/dev/null 2>&1; then
+            echo "::error::osac-branch is not a valid branch, tag, or commit reference"
+            exit 1
+          fi
+
+          OSAC_CLONE_DIR="${RUNNER_TEMP}/osac-test-source"
+          git init "${OSAC_CLONE_DIR}"
+          git -C "${OSAC_CLONE_DIR}" sparse-checkout init --cone
+          git -C "${OSAC_CLONE_DIR}" sparse-checkout set tests
+          git -C "${OSAC_CLONE_DIR}" fetch --depth 1 "${OSAC_REPO}" "${OSAC_REF}"
+          git -C "${OSAC_CLONE_DIR}" checkout FETCH_HEAD
+          if [[ ! -f "${OSAC_CLONE_DIR}/tests/e2e/conftest.py" ]]; then
+            echo "::error::${OSAC_REPO}@${OSAC_REF} does not contain tests/e2e/conftest.py"
+            exit 1
+          fi
+
+          # Keep this repo's pyproject.toml/uv.lock and runner utilities; only
+          # the OSAC-owned test tree is overlaid, matching the CaaS full-install
+          # workflow's test source handling.
+          rm -rf tests/
+          cp -a "${OSAC_CLONE_DIR}/tests" ./tests
 
       # SECURITY: EXTRA_VARS ends up passed as EXTRA_VARS='$(EXTRA_VARS)' on
       # a recipe line through several layers of make (root Makefile ->
@@ -511,12 +554,24 @@ jobs:
               podman build --env GODEBUG=http2client=0 --unsetenv GODEBUG -t "${tag}" -f "${component_dir}/${containerfile_name}" "${build_context}"
             fi
 
+            # Use the CLI from the same fulfillment-service image under test
+            # when one was built from this OSAC ref. Manual runs without a
+            # source component fall back to the pinned/released CLI in the
+            # test Containerfile.
+            if [[ "${image_key}" == "service.images.service" || "${image_key}" == "service.images.service.repository" ]]; then
+              cli_container=$(podman create "${tag}")
+              podman cp "${cli_container}:/usr/local/bin/osac" "${RUNNER_TEMP}/osac-cli-bin"
+              podman rm "${cli_container}" >/dev/null
+              chmod +x "${RUNNER_TEMP}/osac-cli-bin"
+              echo "OSAC_CLI_BIN=${RUNNER_TEMP}/osac-cli-bin" >> "$GITHUB_ENV"
+            fi
+
             echo "Loading ${tag} onto node ${NODE_NAME}..."
             podman save "${tag}" | oc debug "node/${NODE_NAME}" -t=false -- chroot /host podman load
 
             # Map imageKey to ansible extra-var name
             case "${image_key}" in
-              service.images.service.repository) var_name="fulfillment_service_image" ;;
+              service.images.service|service.images.service.repository) var_name="fulfillment_service_image" ;;
               operator.image.repository)   var_name="osac_operator_image" ;;
               aap.bootstrap.image)         var_name="osac_aap_image" ;;
               aap.configAsCode.eeImage)    var_name="osac_aap_ee_image" ;;
@@ -533,6 +588,18 @@ jobs:
           done
 
           echo "overrides=${IMAGE_OVERRIDES}" >> "$GITHUB_OUTPUT"
+
+      - name: Build OSAC E2E test image
+        env:
+          E2E_IMAGE: "osac-e2e-tests:${{ github.run_id }}"
+        run: |
+          BUILD_ARGS=(--no-cache)
+          if [[ -n "${OSAC_CLI_BIN:-}" ]] && [[ -f "${OSAC_CLI_BIN}" ]]; then
+            cp "${OSAC_CLI_BIN}" ./osac-cli-bin
+            BUILD_ARGS+=(--build-arg OSAC_CLI_BIN=osac-cli-bin)
+          fi
+          podman build "${BUILD_ARGS[@]}" -t "${E2E_IMAGE}" -f Containerfile .
+          rm -f ./osac-cli-bin
 
       - name: Deploy OSAC
         timeout-minutes: 90
@@ -558,6 +625,76 @@ jobs:
         env:
           EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
         run: make -C infra/netris deploy-caas EXTRA_VARS="${EXTRA_VARS}"
+
+      - name: Create test adapter route for metering tests
+        id: metering-adapter
+        env:
+          KUBECONFIG: /root/.kube/config
+          OSAC_NAMESPACE: osac-e2e-ci
+        shell: bash
+        run: |
+          SVC_NAME=$(oc get svc \
+            -n "${OSAC_NAMESPACE}" \
+            -l app.kubernetes.io/component=echo-adapter \
+            -o jsonpath='{.items[0].metadata.name}')
+          if [[ -z "${SVC_NAME}" ]]; then
+            echo "::error::No echo-adapter Service found in namespace ${OSAC_NAMESPACE}"
+            exit 1
+          fi
+          oc expose "svc/${SVC_NAME}" -n "${OSAC_NAMESPACE}" --name=metering-test-adapter
+          ROUTE_HOST=$(oc get route metering-test-adapter -n "${OSAC_NAMESPACE}" -o jsonpath='{.spec.host}')
+          if [[ -z "${ROUTE_HOST}" ]]; then
+            echo "::error::Metering test adapter route is not available"
+            exit 1
+          fi
+          echo "url=http://${ROUTE_HOST}" >> "$GITHUB_OUTPUT"
+
+      - name: Run OSAC CaaS fabric E2E tests
+        id: test
+        env:
+          E2E_IMAGE: "osac-e2e-tests:${{ github.run_id }}"
+          TEST_FILTER: ${{ inputs.test-filter }}
+          TEST_MARKER: ${{ inputs.test-marker }}
+          OSAC_NAMESPACE: osac-e2e-ci
+          OSAC_CLUSTER_TEMPLATE: ocp-ci-small
+          METERING_ADAPTER_URL: ${{ steps.metering-adapter.outputs.url }}
+        run: |
+          KUBECONFIG_PATH=/root/.kube/config
+          mkdir -p "$RUNNER_TEMP/test-output"
+          rm -f "$RUNNER_TEMP/caas_ssh_key" "$RUNNER_TEMP/caas_ssh_key.pub"
+          ssh-keygen -t ed25519 -f "$RUNNER_TEMP/caas_ssh_key" -N '' -q
+
+          FILTER_ARGS=()
+          if [[ -n "${TEST_FILTER}" ]]; then
+            FILTER_ARGS=(-k "${TEST_FILTER}")
+          fi
+          MARKER_ARGS=()
+          if [[ -n "${TEST_MARKER}" ]]; then
+            MARKER_ARGS=(-m "${TEST_MARKER}")
+          fi
+
+          podman run --rm --network=host \
+            -v "${KUBECONFIG_PATH}":/root/.kube/config:ro,Z \
+            -v /root/pull-secret:/root/pull-secret:ro,Z \
+            -v "${RUNNER_TEMP}/caas_ssh_key.pub":/root/.ssh/id_rsa.pub:ro,Z \
+            -v "${RUNNER_TEMP}/test-output":/tmp/test-output:Z \
+            -e KUBECONFIG=/root/.kube/config \
+            -e OSAC_NAMESPACE="${OSAC_NAMESPACE}" \
+            -e OSAC_CLUSTER_TEMPLATE="${OSAC_CLUSTER_TEMPLATE}" \
+            -e OSAC_PULL_SECRET_PATH=/root/pull-secret \
+            -e METERING_ADAPTER_URL="${METERING_ADAPTER_URL}" \
+            "${E2E_IMAGE}" \
+            pytest tests/e2e/caas/ "${FILTER_ARGS[@]}" "${MARKER_ARGS[@]}" \
+              -n 0 --junitxml=/tmp/test-output/junit.xml -v
+
+      - name: Gather OSAC test artifacts
+        if: always() && steps.deploy-caas.outcome == 'success'
+        uses: ./.github/actions/gather-artifacts
+        with:
+          namespace: osac-e2e-ci
+          kubeconfig-path: /root/.kube/config
+          artifact-name: osac-logs-caas-netris-full-install-${{ github.run_id }}
+          junit-path: ${{ runner.temp }}/test-output/junit.xml
 
       # Two separate steps, each independently best-effort (rather than one
       # script with both commands): GH Actions' default bash shell runs with

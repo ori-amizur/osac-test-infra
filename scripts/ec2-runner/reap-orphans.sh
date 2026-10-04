@@ -37,20 +37,18 @@
 #                      for why this can't be github.token
 #
 # Optional env vars:
-#   MAX_INSTANCE_AGE_MINUTES  safety-net threshold (default 480). The
-#                      provision/test/teardown job timeouts sum to 415
-#                      minutes (test alone is 360m/6h -- the real CaaS/
-#                      Netris flow's own Prow step timeouts summed to
-#                      several hours in the worst case), but LaunchTime
-#                      (what age is measured from) occurs partway into the
-#                      provision job, and GitHub Actions queue time before a
-#                      job starts executing doesn't count against its
-#                      timeout-minutes budget -- 415 would leave only a few
-#                      minutes of real margin once queueing is considered,
-#                      especially since this watchdog itself shares the same
-#                      singleton osac-ci-orchestrator runner slot with
-#                      provision/teardown (though each watchdog run only
-#                      occupies it for seconds). 480 leaves ~65m headroom;
+#   MAX_INSTANCE_AGE_MINUTES  safety-net threshold (default 720). The
+#                      provision/push-secrets/test/teardown job timeouts sum
+#                      to 670 minutes (test alone is 600m/10h), but
+#                      LaunchTime (what age is measured from) occurs partway
+#                      into provision. The 720-minute threshold leaves 50
+#                      minutes above the configured job timeouts, plus the
+#                      provision time before launch; queue time for later
+#                      jobs consumes some of that margin.
+#                      The watchdog itself shares the singleton
+#                      osac-ci-orchestrator runner slot with provision and
+#                      teardown, though each watchdog run only occupies it
+#                      for seconds.
 #                      tune via this workflow's max-age-minutes dispatch
 #                      input once more real run data exists.
 #   DRY_RUN            "true" to log what would happen without terminating
@@ -68,7 +66,7 @@ YELLOW="\e[33m"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${GH_TOKEN:?GH_TOKEN is required}"
 
-MAX_INSTANCE_AGE_MINUTES="${MAX_INSTANCE_AGE_MINUTES:-480}"
+MAX_INSTANCE_AGE_MINUTES="${MAX_INSTANCE_AGE_MINUTES:-720}"
 DRY_RUN="${DRY_RUN:-false}"
 
 DESCRIBE_OUTPUT=$(mktemp)

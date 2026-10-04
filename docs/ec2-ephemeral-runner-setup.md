@@ -167,8 +167,14 @@ the new values and `vault-sync.sh` again.
 From the GitHub UI (Actions → E2E CaaS Netris → Run workflow) or via
 `gh workflow run`. `instance-type` (default `c5n.metal`) and `aws-region`
 (default `us-east-1`) can optionally be overridden -- neither is sensitive.
-Everything else (AWS credentials, GitHub PAT, AMI/subnet/security group) is
-fetched from Vault automatically -- no other input needed on dispatch.
+The workflow also runs OSAC's `tests/e2e/caas/` tests marked
+`requires_caas_fabric` by default. For a PR run, set `osac-repo` and
+`osac-branch` to the PR repository and immutable head SHA/ref so the workflow
+deploys and tests that source. Supply `components` JSON for the OSAC component
+images that should be built from that same ref. `test-filter` (`pytest -k`)
+and `test-marker` (`pytest -m`) can narrow the run. AWS credentials, GitHub
+PAT, AMI/subnet/security group, Netris license, pull secret, and AAP license
+are fetched from Vault automatically.
 
 The workflow is `workflow_dispatch`-only for now (an interim risk gate) --
 adding a PR trigger or schedule is a separate, deliberate follow-up.
@@ -187,9 +193,10 @@ so it doesn't need updating as new suites are added.
 It terminates an instance if either is true: the GitHub Actions run it's
 tagged with has already completed (so `teardown.sh` should have already run
 but the instance is still alive), or the instance is older than a max-age
-threshold (default 480 minutes -- generous headroom above the `test` job's
-own 360-minute worst case) regardless of run status. Every instance it
-examines is logged either way, whether or not it acts on it.
+threshold (default 720 minutes -- 50 minutes above the maximum summed
+provision/push-secrets/test/teardown timeouts, including the `test` job's
+600-minute ceiling) regardless of run status. Every instance it examines
+is logged either way, whether or not it acts on it.
 
 Override the threshold per-dispatch via the `max-age-minutes` input (no
 workflow file edit needed) if it needs tuning -- e.g. once more real run
