@@ -110,6 +110,12 @@
     - (caas_resource_class_hostnames | default([]) | length) > 0
     - (_agents_for_resource_class | length) == 0
 
+# Agents in the discovery InfraEnv identify candidate machines. The BMF
+# allocator selects Metal3 BareMetalHosts in bmaas_bmh_namespace, so the same
+# instance-type selector must be present on those BMHs as well.
+- name: Label and validate CaaS BareMetalHosts for the OSAC allocator
+  ansible.builtin.include_tasks: label-worker-bmhs.yml
+
 - name: Label agent with resource class
   ansible.builtin.command:
     cmd: >-

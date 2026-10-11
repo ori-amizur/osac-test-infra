@@ -77,7 +77,7 @@ make deploy
 make deploy-fast
 
 # Then run a test flow
-make setup-caas    # CaaS setup: discover hosts, label agents, register host type
+make setup-caas    # CaaS setup: discover hosts, label Agents and BMHs, register worker inventory
 make deploy-caas   # CaaS: create cluster
 ```
 
@@ -100,10 +100,24 @@ After deployment, the kubeconfig is at `/root/.kube/config`.
 
 | Target | Description | Time |
 |--------|-------------|------|
-| `make setup-caas` | Discover hosts, label agents, ensure the shared CaaS worker DiskImage/ClusterVersion catalog entries, register host type, configure osac CLI | ~30 min |
+| `make setup-caas` | Discover hosts, label discovery Agents and matching BMaaS BareMetalHosts, validate the worker inventory, ensure shared CaaS catalog entries, and configure the OSAC CLI | ~30 min |
 | `make deploy-caas` | Create CaaS cluster using `ocp_ci_small` template | ~60 min |
 | `make setup-maas` | Same as setup-caas with MaaS host type / sizing; labels only `MAAS_LABEL_HOSTNAMES` (default h02+h03) with `g5` | ~30 min |
 | `make deploy-maas` | Create MaaS cluster (`ocp_4_20_ai_maas` + `-p` template params) | ~60 min |
+
+The first discovery boot uses the shared InfraEnv in `hardware-inventory` to
+identify candidate machines. `setup-caas` labels those discovery Agents and the
+corresponding BareMetalHosts in `host-inventory`; BMF allocates from the latter
+using the BareMetalInstanceType's host-label selector. An Agent label alone does
+not make a BareMetalHost allocatable.
+
+After a ClusterOrder is created, OSAC creates an order-specific InfraEnv in the
+ClusterOrder namespace. It passes that InfraEnv's ignition as the worker BMI's
+user data, and the Metal3 provisioning workflow writes it to the selected BMH
+before provisioning. The installed worker should then register as an Agent in
+the ClusterOrder namespace. For the CI workflow that namespace is
+`osac-e2e-ci`; the original Agents in `hardware-inventory` remain discovery
+inventory. Failure artifacts collect InfraEnvs and Agents from both namespaces.
 
 ### Destroy
 
@@ -183,7 +197,7 @@ make connectivity   # re-runs VPN, socat, ISP FRR, softgate agents
 
 **Deploy CaaS after OSAC is up:**
 ```bash
-make setup-caas     # discover hosts, label agents, register host type
+make setup-caas     # discover hosts, label Agents and BMHs, register worker inventory
 make deploy-caas    # create cluster
 ```
 
@@ -342,9 +356,9 @@ make deploy-osac EXTRA_VARS='{"osac_branch": "feature-x"}'
 | `dns_server` | `8.8.8.8` | Upstream DNS server for the lab (override in environments where public DNS is blocked) |
 | `caas_cluster_template` | `osac.templates.ocp_ci_small` | Cluster template for CaaS cluster creation |
 | `caas_cluster_name` | `caas-ci-cluster` | CaaS cluster name |
-| `caas_host_type_id` | `ci-worker` | Resource class for CaaS agents |
+| `caas_host_type_id` | `ci-worker` | Resource class for discovery Agents; matching BMHs receive the BareMetalInstanceType selector labels |
 | `caas_cluster_baremetal_instance_type` | `ci-worker` | Shared BareMetalInstanceType ensured by `setup-caas`; independent of the HostType/resource class |
-| `caas_cluster_baremetal_instance_type_host_labels` | `osac.openshift.io/resource_class: ci-worker` | Inventory host selector stored in the instance type; defaults to the configured resource class |
+| `caas_cluster_baremetal_instance_type_host_labels` | `osac.openshift.io/resource_class: ci-worker` | Inventory host selector stored in the instance type and applied to selected BMHs; defaults to the configured resource class |
 | `caas_cluster_baremetal_instance_type_network_ports` | `eth9` fabric port | Hardware network ports stored in the instance type; defaults to the BM provisioning fabric port |
 | `snapshot_flavor_image` | `quay.io/osac-project/cluster-flavors:caas` | OCI image containing the snapshot flavor |
 | `snapshot_osac_namespace` | `osac-e2e-ci` | OSAC namespace baked into the snapshot |
@@ -458,9 +472,11 @@ dns_server: "10.0.0.1"
 | `caas_cluster_release_image` | `quay.io/openshift-release-dev/ocp-release:4.22.0-multi` | OpenShift release payload for the CaaS ClusterVersion | defaults only |
 | `caas_cluster_disk_image_name` | `rhcos-4-22` | RHCOS DiskImage ensured by `setup-caas` | defaults only |
 | `caas_cluster_disk_image_source_ref` | `oci://quay.io/rh_ee_rpiccoli/rhcos-bmi:4.22.0` | RHCOS BMI image source | defaults only |
-| `caas_host_type_id` | `ci-worker` | Resource class label for CaaS agents | defaults only |
+| `caas_discovery_infraenv_namespace` | `hardware-inventory` | Shared InfraEnv namespace used to discover candidate VMs; ClusterOrders get separate InfraEnvs | defaults only |
+| `bmaas_bmh_namespace` | `host-inventory` | Namespace containing the Metal3 BareMetalHosts selected by BMF | defaults only |
+| `caas_host_type_id` | `ci-worker` | Resource class label for discovery Agents; matching BMHs receive the BareMetalInstanceType selector labels | defaults only |
 | `caas_cluster_baremetal_instance_type` | `ci-worker` | Shared BareMetalInstanceType ensured by `setup-caas`; independent of the HostType/resource class | defaults only |
-| `caas_cluster_baremetal_instance_type_host_labels` | `osac.openshift.io/resource_class: ci-worker` | Inventory host selector for the worker instance type | defaults only |
+| `caas_cluster_baremetal_instance_type_host_labels` | `osac.openshift.io/resource_class: ci-worker` | Inventory host selector stored on the instance type and applied to selected BMHs | defaults only |
 | `caas_cluster_baremetal_instance_type_network_ports` | `eth9` fabric port | Netris hardware ports for the worker instance type | defaults only |
 | `caas_discovery_vcpu` | `4` | Discovery VM vCPUs | yes (8) |
 | `caas_discovery_vcpu_overrides` | `{}` | Per-VM vCPU map (VM name → count); empty = use `caas_discovery_vcpu` | defaults only |

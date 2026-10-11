@@ -8,7 +8,8 @@
 # Environment:
 #   KUBECONFIG             — path to cluster kubeconfig (required)
 #   E2E_NAMESPACE          — OSAC namespace (default: osac-e2e-ci)
-#   OSAC_AGENT_NAMESPACE   — namespace where Assisted Installer Agent CRs live (default: hardware-inventory)
+#   OSAC_AGENT_NAMESPACE   — shared discovery Agent namespace (default: hardware-inventory);
+#                            order-scoped InfraEnvs/Agents are collected from E2E_NAMESPACE too
 #   JUNIT_PATH             — path to JUnit XML to include (optional)
 #
 set -o nounset
@@ -99,13 +100,38 @@ oc get clusterorders -n "${E2E_NAMESPACE}" -o json 2>"${ARTIFACT_DIR}/clusterord
     | jq 'del(.items[]?.spec.templateParameters)' \
     > "${ARTIFACT_DIR}/clusterorders.json" || true
 
-echo "Collecting agent status..."
+echo "Collecting Assisted Service InfraEnv and Agent status..."
 AGENT_NAMESPACE="${OSAC_AGENT_NAMESPACE:-hardware-inventory}"
-if oc get namespace "${AGENT_NAMESPACE}" &>/dev/null; then
-    oc get agents.agent-install.openshift.io -n "${AGENT_NAMESPACE}" -o wide > "${ARTIFACT_DIR}/agents.txt" 2>&1 || true
-    oc get agents.agent-install.openshift.io -n "${AGENT_NAMESPACE}" -o yaml > "${ARTIFACT_DIR}/agents.yaml" 2>&1 || true
-else
-    echo "  Agent namespace ${AGENT_NAMESPACE} not found, skipping agent collection"
+
+# Discovery Agents identify candidate machines in the shared inventory
+# namespace. OSAC creates a separate InfraEnv for each ClusterOrder, so the
+# provisioned workers should register in E2E_NAMESPACE. Capture both sides of
+# that handoff; collecting only the discovery namespace hid order-scoped Agent
+# registration failures.
+collect_assisted_inventory() {
+    local ns="$1"
+    local prefix="$2"
+    if ! oc get namespace "${ns}" &>/dev/null; then
+        echo "  Assisted namespace ${ns} not found, skipping ${prefix} collection"
+        return
+    fi
+
+    oc get infraenvs.agent-install.openshift.io -n "${ns}" -o wide \
+        > "${ARTIFACT_DIR}/${prefix}-infraenvs.txt" 2>&1 || true
+    oc get agents.agent-install.openshift.io -n "${ns}" -o wide \
+        > "${ARTIFACT_DIR}/${prefix}-agents.txt" 2>&1 || true
+    oc get agents.agent-install.openshift.io -n "${ns}" -o yaml \
+        > "${ARTIFACT_DIR}/${prefix}-agents.yaml" 2>&1 || true
+}
+
+collect_assisted_inventory "${AGENT_NAMESPACE}" "discovery"
+# Preserve the original artifact paths consumed by earlier investigations.
+cp "${ARTIFACT_DIR}/discovery-agents.txt" "${ARTIFACT_DIR}/agents.txt" 2>/dev/null || true
+cp "${ARTIFACT_DIR}/discovery-agents.yaml" "${ARTIFACT_DIR}/agents.yaml" 2>/dev/null || true
+cp "${ARTIFACT_DIR}/discovery-infraenvs.txt" "${ARTIFACT_DIR}/infraenvs.txt" 2>/dev/null || true
+
+if [[ "${E2E_NAMESPACE}" != "${AGENT_NAMESPACE}" ]]; then
+    collect_assisted_inventory "${E2E_NAMESPACE}" "cluster-order"
 fi
 
 echo "Collecting networking status..."

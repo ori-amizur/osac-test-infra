@@ -148,7 +148,7 @@ caas_discovery_infraenv_namespace: "hardware-inventory"
 # forwarding the agents to the OCP ingress -- now fixed in discover-caas.)
 caas_discovery_vm_overrides: {}
 
-# CaaS Setup (host type, agent annotations, cluster creation)
+# CaaS Setup (host type, discovery Agent/BMH labels, cluster creation)
 caas_agent_namespace: "{{ caas_discovery_infraenv_namespace }}"
 caas_server_cluster_template_name: "ns-only"
 caas_server_cluster_template_gateway: "192.168.101.1/24"
@@ -177,6 +177,8 @@ caas_cluster_node_set_size: 3
 # separate from caas_host_type_id, which is still used for resource-class labels
 # and NETRIS_RESOURCE_CLASS_MAP configuration.
 caas_cluster_baremetal_instance_type: "ci-worker"
+# These labels are stored in the shared instance type and applied to selected
+# BareMetalHosts in bmaas_bmh_namespace so the BMF selector can find them.
 caas_cluster_baremetal_instance_type_host_labels:
   osac.openshift.io/resource_class: "{{ caas_host_type_id }}"
 # These are Netris server-port names, not Linux interface names (ens5/ens6).
@@ -189,9 +191,10 @@ caas_cluster_baremetal_instance_type_network_ports:
 # When non-empty, osac create uses --pull-secret-file / --ssh-public-key-file and
 # -p for each entry instead of the default CaaS credential arguments (MaaS templates).
 caas_cluster_params: []
-# Empty = label/approve every discovered agent with resource_class (setup-caas).
+# Empty = label/approve every discovered agent and label every matching BMH.
 # Non-empty = only these inventory hostnames get osac.openshift.io/resource_class
-# (others are unlabeled). setup-maas defaults to h02+h03 so MaaS claims those workers.
+# on both the Agent and BMH (other Agents/BMHs are unlabeled). setup-maas defaults
+# to h02+h03 so MaaS claims those workers.
 caas_resource_class_hostnames: []
 caas_agents:
   - vm_pattern: "hgx-pod00-su0-h01"

@@ -132,8 +132,9 @@ MAAS_DISCOVERY_VCPU      ?= 10
 MAAS_DISCOVERY_MEMORY_MB ?= 20480
 MAAS_DISCOVERY_VCPU_OVERRIDES ?= {"hgx-pod00-su0-h01":4}
 MAAS_DISCOVERY_MEMORY_MB_OVERRIDES ?= {"hgx-pod00-su0-h01":16384}
-# Only these inventory hostnames get resource_class=g5 (and approval). Empty = all agents.
-# Comma-separated. Keeps h01 out of the MaaS claim pool; setup-caas still labels all as ci-worker.
+# Only these inventory hostnames get resource_class=g5 on their discovery Agents
+# and BMHs (the Agents are approved). Empty = all agents. Comma-separated.
+# Keeps h01 out of the MaaS claim pool; a separate default setup-caas labels all as ci-worker.
 MAAS_LABEL_HOSTNAMES ?= hgx-pod00-su0-h02,hgx-pod00-su0-h03
 # Template -p flags for osac create (deploy-maas only). Comma-separated key=value.
 MAAS_CLUSTER_PARAMS   ?= enable_maas=true,enable_keycloak=true,enable_observability=true,enable_dashboard=true

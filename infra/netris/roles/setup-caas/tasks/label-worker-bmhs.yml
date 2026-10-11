@@ -1,0 +1,281 @@
+---
+- name: Validate CaaS BareMetalInstanceType selector for host labeling
+  ansible.builtin.assert:
+    that:
+      - caas_cluster_baremetal_instance_type_host_labels is mapping
+      - caas_cluster_baremetal_instance_type_host_labels | length > 0
+      - >-
+        (caas_resource_class_hostnames | default([]) | length == 0) or
+        ('osac.openshift.io/resource_class' in caas_cluster_baremetal_instance_type_host_labels)
+    fail_msg: >-
+      CaaS BMHs need a non-empty BareMetalInstanceType selector. When filtering
+      caas_resource_class_hostnames, the selector must include
+      osac.openshift.io/resource_class so excluded hosts cannot be allocated.
+
+- name: Resolve selected discovery agents to their BMaaS BareMetalHosts
+  ansible.builtin.shell: |
+    python3 <<'PY'
+    import json
+    import os
+    import re
+
+    def read_json(name):
+        try:
+            return json.loads(os.environ[name])
+        except (KeyError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"invalid {name}: {exc}") from exc
+
+    agent_hostnames = read_json("CAAS_AGENT_HOSTNAMES_JSON")
+    selected_agents = read_json("CAAS_SELECTED_AGENTS_JSON")
+    caas_agents = read_json("CAAS_AGENT_MAPPINGS_JSON")
+    discovery_vms = read_json("CAAS_DISCOVERY_VMS_JSON")
+
+    if len(discovery_vms) != len(set(discovery_vms)):
+        raise SystemExit(f"duplicate discovery VM names: {discovery_vms}")
+
+    compiled = []
+    for entry in caas_agents:
+        pattern = entry.get("vm_pattern", "")
+        try:
+            compiled.append((entry, re.compile(pattern)))
+        except re.error as exc:
+            raise SystemExit(f"invalid caas_agents vm_pattern {pattern!r}: {exc}") from exc
+
+    for vm in discovery_vms:
+        matches = [entry for entry, pattern in compiled if pattern.search(vm)]
+        if len(matches) != 1:
+            raise SystemExit(
+                f"discovery VM {vm!r} matched {len(matches)} caas_agents entries; expected exactly one"
+            )
+    selected_bmhs = []
+    agent_to_bmh = {}
+    for agent_name in selected_agents:
+        hostname = agent_hostnames.get(agent_name)
+        if not hostname:
+            raise SystemExit(f"selected discovery Agent {agent_name!r} has no inventory hostname")
+
+        matches = [entry for entry, pattern in compiled if pattern.search(hostname)]
+        if len(matches) != 1:
+            raise SystemExit(
+                f"Agent {agent_name!r} hostname {hostname!r} matched {len(matches)} caas_agents entries; "
+                "expected exactly one"
+            )
+
+        entry = matches[0]
+        pattern = re.compile(entry["vm_pattern"])
+        bmh_matches = [vm for vm in discovery_vms if pattern.search(vm)]
+        if len(bmh_matches) != 1:
+            raise SystemExit(
+                f"Agent {agent_name!r} hostname {hostname!r} maps to {len(bmh_matches)} discovery VMs; "
+                "expected exactly one"
+            )
+
+        bmh_name = bmh_matches[0]
+        if bmh_name in selected_bmhs:
+            raise SystemExit(f"multiple selected Agents map to BareMetalHost {bmh_name!r}")
+        selected_bmhs.append(bmh_name)
+        agent_to_bmh[agent_name] = bmh_name
+
+    print(json.dumps({
+        "selected_bmhs": selected_bmhs,
+        "unselected_bmhs": [vm for vm in discovery_vms if vm not in selected_bmhs],
+        "agent_to_bmh": agent_to_bmh,
+    }))
+    PY
+  environment:
+    CAAS_AGENT_HOSTNAMES_JSON: "{{ _agent_hostname_map | to_json }}"
+    CAAS_SELECTED_AGENTS_JSON: "{{ _agents_for_resource_class | to_json }}"
+    CAAS_AGENT_MAPPINGS_JSON: "{{ caas_agents | to_json }}"
+    CAAS_DISCOVERY_VMS_JSON: "{{ caas_discovery_vms | to_json }}"
+  register: _caas_bmh_label_plan_raw
+  changed_when: false
+
+- name: Store selected and excluded CaaS BareMetalHost names
+  ansible.builtin.set_fact:
+    _caas_bmh_label_plan: "{{ _caas_bmh_label_plan_raw.stdout | from_json }}"
+    _caas_bmhs_for_resource_class: "{{ (_caas_bmh_label_plan_raw.stdout | from_json).selected_bmhs }}"
+    _caas_bmhs_outside_resource_class: "{{ (_caas_bmh_label_plan_raw.stdout | from_json).unselected_bmhs }}"
+
+- name: Show CaaS BareMetalHost labeling plan
+  ansible.builtin.debug:
+    msg: >-
+      selector={{ caas_cluster_baremetal_instance_type_host_labels }} on
+      {{ _caas_bmhs_for_resource_class | length }}/{{ caas_discovery_vms | length }}
+      BareMetalHosts in {{ bmaas_bmh_namespace }};
+      Agent-to-BMH map={{ _caas_bmh_label_plan.agent_to_bmh }}
+
+- name: Read BMaaS BareMetalHost inventory before labeling
+  ansible.builtin.command:
+    argv:
+      - oc
+      - get
+      - bmh
+      - -n
+      - "{{ bmaas_bmh_namespace }}"
+      - -o
+      - json
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _caas_bmh_inventory_before
+  changed_when: false
+  until: >-
+    _caas_bmh_inventory_before.rc == 0 and
+    ((_caas_bmh_inventory_before.stdout | from_json).get('items', []) | length)
+    >= (_caas_bmhs_for_resource_class | length)
+  retries: 12
+  delay: 10
+
+- name: Store current BMaaS BareMetalHost names
+  ansible.builtin.set_fact:
+    _caas_bmh_names_before: >-
+      {{ (_caas_bmh_inventory_before.stdout | from_json).get('items', [])
+         | map(attribute='metadata.name') | list }}
+
+- name: Require every selected discovery VM to have a BMaaS BareMetalHost
+  ansible.builtin.assert:
+    that:
+      - _caas_bmhs_for_resource_class | difference(_caas_bmh_names_before) | length == 0
+    fail_msg: >-
+      No BareMetalHost exists in {{ bmaas_bmh_namespace }} for selected discovery
+      VMs {{ _caas_bmhs_for_resource_class | difference(_caas_bmh_names_before) }}.
+
+- name: Label selected BMHs with the CaaS worker selector
+  ansible.builtin.command:
+    argv:
+      - oc
+      - label
+      - "bmh/{{ item.0 }}"
+      - -n
+      - "{{ bmaas_bmh_namespace }}"
+      - "{{ item.1.key }}={{ item.1.value }}"
+      - --overwrite
+  environment:
+    KUBECONFIG: /root/.kube/config
+  loop: >-
+    {{ _caas_bmhs_for_resource_class
+       | product(caas_cluster_baremetal_instance_type_host_labels | dict2items)
+       | list }}
+  loop_control:
+    label: "{{ item.0 }} {{ item.1.key }}={{ item.1.value }}"
+  register: _caas_bmh_label_result
+  changed_when: >-
+    'labeled' in _caas_bmh_label_result.stdout and
+    'not labeled' not in _caas_bmh_label_result.stdout
+  until: _caas_bmh_label_result.rc == 0
+  retries: 5
+  delay: 10
+
+- name: Remove stale resource-class labels from excluded BMHs
+  ansible.builtin.command:
+    argv:
+      - oc
+      - label
+      - "bmh/{{ item }}"
+      - -n
+      - "{{ bmaas_bmh_namespace }}"
+      - osac.openshift.io/resource_class-
+      - --overwrite
+  environment:
+    KUBECONFIG: /root/.kube/config
+  loop: "{{ _caas_bmhs_outside_resource_class }}"
+  when:
+    - (caas_resource_class_hostnames | default([]) | length) > 0
+  register: _caas_bmh_unlabel_result
+  changed_when: >-
+    'labeled' in _caas_bmh_unlabel_result.stdout or
+    'unlabeled' in _caas_bmh_unlabel_result.stdout
+  failed_when: false
+
+- name: Read BMaaS BareMetalHost inventory after labeling
+  ansible.builtin.command:
+    argv:
+      - oc
+      - get
+      - bmh
+      - -n
+      - "{{ bmaas_bmh_namespace }}"
+      - -o
+      - json
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _caas_bmh_inventory_after
+  changed_when: false
+  until: _caas_bmh_inventory_after.rc == 0
+  retries: 5
+  delay: 5
+
+- name: Select BMH objects matching the configured CaaS worker selector
+  ansible.builtin.set_fact:
+    _caas_selected_bmh_resources: >-
+      {{ (_caas_bmh_inventory_after.stdout | from_json).get('items', [])
+         | selectattr('metadata.name', 'in', _caas_bmhs_for_resource_class)
+         | list }}
+    _caas_excluded_bmh_resources: >-
+      {{ (_caas_bmh_inventory_after.stdout | from_json).get('items', [])
+         | selectattr('metadata.name', 'in', _caas_bmhs_outside_resource_class)
+         | list }}
+
+- name: Require all selected BMH objects to be present
+  ansible.builtin.assert:
+    that:
+      - _caas_selected_bmh_resources | length == _caas_bmhs_for_resource_class | length
+    fail_msg: >-
+      Could not read all selected BareMetalHosts back from {{ bmaas_bmh_namespace }}
+      after labeling. Expected {{ _caas_bmhs_for_resource_class }}.
+
+- name: Verify configured worker selector labels on selected BMHs
+  ansible.builtin.assert:
+    that:
+      - item.0.get('metadata', {}).get('labels', {}).get(item.1.key, '') == item.1.value
+    fail_msg: >-
+      BareMetalHost {{ item.0.metadata.name }} is missing selector label
+      {{ item.1.key }}={{ item.1.value }} required by BareMetalInstanceType
+      '{{ caas_cluster_baremetal_instance_type }}'.
+  loop: >-
+    {{ _caas_selected_bmh_resources
+       | product(caas_cluster_baremetal_instance_type_host_labels | dict2items)
+       | list }}
+  loop_control:
+    label: "{{ item.0.metadata.name }} {{ item.1.key }}"
+
+- name: Verify filtered-out BMHs do not match the CaaS worker selector
+  ansible.builtin.assert:
+    that:
+      - >-
+        item.get('metadata', {}).get('labels', {}).get('osac.openshift.io/resource_class', '')
+        != caas_cluster_baremetal_instance_type_host_labels['osac.openshift.io/resource_class']
+    fail_msg: >-
+      Excluded BareMetalHost {{ item.metadata.name }} still has resource_class
+      {{ caas_cluster_baremetal_instance_type_host_labels['osac.openshift.io/resource_class'] }};
+      BMF could allocate a host outside caas_resource_class_hostnames.
+  loop: "{{ _caas_excluded_bmh_resources }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  when: (caas_resource_class_hostnames | default([]) | length) > 0
+
+- name: Verify selected BMHs pass baseline BMF availability checks
+  ansible.builtin.assert:
+    that:
+      - item.get('status', {}).get('operationalStatus', '') == 'OK'
+      - item.get('status', {}).get('provisioning', {}).get('state', '') == 'available'
+      - item.get('spec', {}).get('consumerRef') is none
+      - item.get('metadata', {}).get('labels', {}).get('osac.openshift.io/managed-by', 'baremetal') == 'baremetal'
+    fail_msg: >-
+      BareMetalHost {{ bmaas_bmh_namespace }}/{{ item.metadata.name }} is not
+      passing baseline BMF availability checks: operationalStatus={{ item.get('status', {}).get('operationalStatus', 'missing') }},
+      provisioning.state={{ item.get('status', {}).get('provisioning', {}).get('state', 'missing') }},
+      consumerRef={{ item.get('spec', {}).get('consumerRef', 'missing') }},
+      managed-by={{ item.get('metadata', {}).get('labels', {}).get('osac.openshift.io/managed-by', 'baremetal') }}.
+      BMF also requires hardware inspection to be enabled and NIC inventory to be present.
+  loop: "{{ _caas_selected_bmh_resources }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+
+- name: Report CaaS selector and baseline availability checks complete
+  ansible.builtin.debug:
+    msg: >-
+      {{ _caas_selected_bmh_resources | length }} BareMetalHosts in
+      {{ bmaas_bmh_namespace }} have selector
+      {{ caas_cluster_baremetal_instance_type_host_labels }} and are OK,
+      available, unclaimed, and managed by baremetal. BMF still verifies
+      hardware inspection and NIC inventory during allocation.

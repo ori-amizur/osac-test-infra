@@ -41,7 +41,7 @@ make deploy-infra           # Deploy netris-lab
 make deploy-ocp             # Configure Netris networking + restore OCP SNO from snapshot
 make deploy-osac            # Deploy OSAC (fresh Helm install or snapshot refresh based on OSAC_DEPLOY_MODE)
 make connectivity           # Re-run lab connectivity (VPN, BGP, softgate agents)
-make setup-caas             # CaaS setup: discover hosts, label agents, register host type
+make setup-caas             # CaaS setup: discover hosts, label Agents and BMHs, register worker inventory
 make deploy-caas            # CaaS: create cluster
 make setup-maas             # MaaS setup (wrappers over setup-caas with MaaS overrides)
 make deploy-maas            # MaaS: create cluster (ocp_4_20_ai_maas + -p params)
@@ -96,7 +96,7 @@ All variables in `inventory/group_vars/all.yml`. Key sections:
 - **OSAC**: `osac_repo/branch`, `osac_namespace`, `osac_values_file`
 - **Component images**: `osac_operator_image`, `fulfillment_service_image` (empty = defaults)
 - **Snapshot**: `snapshot_flavor_image`, `snapshot_flavor_dir`, `snapshot_recert_image`, `snapshot_osac_namespace`, `snapshot_osac_values_file`
-- **CaaS / MaaS**: `caas_discovery_vm_patterns`, `caas_host_type_id`, `caas_cluster_name`, `caas_agents`, `caas_resource_class_hostnames` (empty = all agents); per-VM sizing via `caas_discovery_vcpu_overrides` / `caas_discovery_memory_mb_overrides`; MaaS Makefile `MAAS_*` (incl. `MAAS_DISCOVERY_MEMORY_MB_OVERRIDES`, default h01→16GiB)
+- **CaaS / MaaS**: `caas_discovery_vm_patterns`, `caas_host_type_id`, `caas_cluster_name`, `caas_agents`, `caas_resource_class_hostnames` (empty = all discovery Agents and matching BMHs); per-VM sizing via `caas_discovery_vcpu_overrides` / `caas_discovery_memory_mb_overrides`; MaaS Makefile `MAAS_*` (incl. `MAAS_DISCOVERY_MEMORY_MB_OVERRIDES`, default h01→16GiB)
 
 ## External Dependencies
 
