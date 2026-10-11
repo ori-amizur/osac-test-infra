@@ -664,6 +664,16 @@ jobs:
           MERGED=$(jq -nc --argjson base "${EXTRA_VARS}" --argjson built "${COMPONENT_OVERRIDES}" '$base + $built')
           make deploy-osac INFRA=netris SUITE=caas EXTRA_VARS="${MERGED}"
 
+      # CaaS uses the BMaaS BMH pool. Create those hosts after OSAC is ready
+      # (BMaaS registers its catalog there) and before CaaS boots the same VMs
+      # for Assisted Service discovery and labels their corresponding BMHs.
+      - name: Setup BMaaS hosts for CaaS
+        shell: bash
+        timeout-minutes: 30
+        env:
+          EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
+        run: make setup-suite INFRA=netris SUITE=bmaas_networking EXTRA_VARS="${EXTRA_VARS}"
+
       - name: Setup CaaS hosts and catalog
         shell: bash
         # 45m (was 30m): discover-caas now captures each VM's early-boot console,
