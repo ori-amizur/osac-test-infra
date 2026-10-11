@@ -1,0 +1,42 @@
+---
+- name: Capture CaaS worker boot and provisioning diagnostics
+  hosts: all
+  gather_facts: false
+  pre_tasks:
+    - name: Detect effective OSAC namespace
+      ansible.builtin.shell:
+        cmd: >-
+          oc get namespace {{ snapshot_osac_namespace }} >/dev/null 2>&1
+          && echo {{ snapshot_osac_namespace }} || echo {{ osac_namespace }}
+      environment:
+        KUBECONFIG: /root/.kube/config
+      register: _worker_diagnostics_namespace
+      changed_when: false
+      failed_when: false
+
+    - name: Set CaaS worker diagnostics directory
+      ansible.builtin.set_fact:
+        _caas_worker_diagnostics_dir: "{{ playbook_dir }}/../logs/caas/worker-diagnostics"
+
+    - name: Create CaaS worker diagnostics directory
+      ansible.builtin.file:
+        path: "{{ _caas_worker_diagnostics_dir }}"
+        state: directory
+        mode: "0755"
+      failed_when: false
+
+  tasks:
+    - name: Capture or stop worker serial consoles and snapshot worker resources
+      ansible.builtin.script:
+        cmd: >-
+          {{ playbook_dir }}/../scripts/capture_caas_worker_diagnostics.py
+          {{ caas_worker_diagnostics_action | default('collect') }}
+          --output-dir {{ _caas_worker_diagnostics_dir | quote }}
+          --namespace {{ (_worker_diagnostics_namespace.stdout | default(osac_namespace, true)) | trim | quote }}
+          --discovery-namespace {{ caas_agent_namespace | quote }}
+          --bmh-namespace {{ bmaas_bmh_namespace | quote }}
+          --vm-patterns-json {{ caas_discovery_vm_patterns | to_json | quote }}
+      environment:
+        KUBECONFIG: /root/.kube/config
+      changed_when: false
+      failed_when: false

@@ -118,6 +118,11 @@ before provisioning. The installed worker should then register as an Agent in
 the ClusterOrder namespace. For the CI workflow that namespace is
 `osac-e2e-ci`; the original Agents in `hardware-inventory` remain discovery
 inventory. Failure artifacts collect InfraEnvs and Agents from both namespaces.
+The Netris workflow also starts serial-console capture before ClusterOrder
+provisioning and stops it after deployment/tests. Its
+`caas/worker-diagnostics/` artifact directory contains those boot logs, a
+redacted snapshot of the ClusterOrder, worker BMIs and selected BMH statuses,
+and the AAP job IDs that link to stdout in the separate OSAC artifact.
 
 ### Destroy
 

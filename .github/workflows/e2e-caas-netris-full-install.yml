@@ -684,6 +684,19 @@ jobs:
           EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
         run: make setup-suite INFRA=netris SUITE=caas EXTRA_VARS="${EXTRA_VARS}"
 
+      # Keep a serial-console reader attached while the ClusterOrder/AAP flow
+      # reboots the selected BMaaS VMs. A post-failure virsh console cannot
+      # replay output emitted before the connection was opened.
+      - name: Start CaaS worker serial capture
+        timeout-minutes: 3
+        shell: bash
+        continue-on-error: true
+        env:
+          EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
+        run: >-
+          make -C infra/netris capture-caas-worker-diagnostics
+          CAAS_WORKER_DIAGNOSTICS_ACTION=start EXTRA_VARS="${EXTRA_VARS}"
+
       - name: Deploy CaaS cluster
         id: deploy-caas
         timeout-minutes: 90
@@ -752,6 +765,17 @@ jobs:
             "${E2E_IMAGE}" \
             pytest tests/e2e/caas/ "${FILTER_ARGS[@]}" "${MARKER_ARGS[@]}" \
               -n 0 --junitxml=/tmp/test-output/junit.xml -v
+
+      - name: Capture CaaS worker diagnostics
+        if: always()
+        timeout-minutes: 10
+        shell: bash
+        continue-on-error: true
+        env:
+          EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
+        run: >-
+          make -C infra/netris capture-caas-worker-diagnostics
+          CAAS_WORKER_DIAGNOSTICS_ACTION=collect EXTRA_VARS="${EXTRA_VARS}"
 
       - name: Gather OSAC test artifacts
         if: always() && steps.deploy-osac.outcome != 'skipped' && steps.deploy-osac.outcome != ''

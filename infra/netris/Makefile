@@ -99,6 +99,12 @@ gather-mgmt-cluster:
 gather-caas:
 	ansible-playbook playbooks/gather-caas.yml $(ANSIBLE_EXTRA)
 
+CAAS_WORKER_DIAGNOSTICS_ACTION ?= collect
+
+capture-caas-worker-diagnostics:
+	ansible-playbook playbooks/capture-caas-worker-diagnostics.yml $(ANSIBLE_EXTRA) \
+		-e caas_worker_diagnostics_action=$(CAAS_WORKER_DIAGNOSTICS_ACTION)
+
 setup-bmc:
 	ansible-playbook playbooks/setup-bmc.yml $(ANSIBLE_EXTRA)
 
@@ -275,7 +281,7 @@ health-check:
 		destroy-osac destroy-ocp destroy-infra destroy-setup destroy-full \
 		destroy-caas force-destroy-caas \
         setup-maas deploy-maas destroy-maas force-destroy-maas \
-        gather-infra gather-mgmt-cluster gather-caas \
+		gather-infra gather-mgmt-cluster gather-caas capture-caas-worker-diagnostics \
         setup-bmc setup-bmaas destroy-bmaas gather-bmaas \
         setup-bmaas_networking destroy-bmaas_networking gather-bmaas_networking \
         install-osac prep-osac run-osac-setup post-osac \
