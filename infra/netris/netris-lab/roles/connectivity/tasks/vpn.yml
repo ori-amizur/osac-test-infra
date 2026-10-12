@@ -27,12 +27,68 @@
   changed_when: false
 
 - name: Wait for mgmt-server OpenVPN server
-  shell: ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@192.168.122.10 "systemctl is-active openvpn@server"
-  register: vpn_server_check
-  until: vpn_server_check.stdout == "active"
-  retries: 30
-  delay: 10
-  changed_when: false
+  block:
+    - name: Poll mgmt-server OpenVPN service
+      shell: ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@192.168.122.10 "systemctl is-active openvpn@server"
+      register: vpn_server_check
+      until: vpn_server_check.stdout == "active"
+      retries: 30
+      delay: 10
+      changed_when: false
+  rescue:
+    - name: Create management server diagnostic directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../logs/lab/openvpn"
+        state: directory
+        mode: "0755"
+
+    - name: Capture management server startup diagnostics
+      ansible.builtin.shell: |
+        set -o pipefail
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@192.168.122.10 '
+          set +e
+          echo "=== cloud-init status ==="
+          cloud-init status --long 2>&1 || true
+          echo "=== cloud-init output, last 300 lines ==="
+          tail -n 300 /var/log/cloud-init-output.log 2>&1 || true
+          echo "=== relevant cloud-init log entries ==="
+          grep -Ei "openvpn|runcmd|error|failed|warning|package" /var/log/cloud-init.log 2>/dev/null | tail -n 150 || true
+          echo "=== OpenVPN service status ==="
+          systemctl status openvpn@server --no-pager -l 2>&1 || true
+          echo "=== OpenVPN boot journal ==="
+          journalctl -b -u openvpn@server --no-pager -n 200 2>&1 || true
+          echo "=== resolver configuration ==="
+          cat /etc/resolv.conf 2>&1 || true
+          echo "=== raw.githubusercontent.com lookup ==="
+          getent ahosts raw.githubusercontent.com 2>&1 || true
+          echo "=== HTTPS check to OpenVPN file host ==="
+          curl -sS -L --connect-timeout 5 --max-time 15 -o /dev/null -w "HTTP %{http_code}\\n" https://raw.githubusercontent.com/rawfilescloud/ovpn-config-examples/main/ca.crt 2>&1 || true
+          echo "=== OpenVPN file metadata ==="
+          for file in /etc/openvpn/server.conf /etc/openvpn/ca.crt /etc/openvpn/dh.pem /etc/openvpn/myservername.crt /etc/openvpn/myservername.key /etc/openvpn/ta.key; do
+            stat -c "%n %s bytes mode=%a" "$file" 2>&1 || true
+          done
+          echo "=== server certificate metadata ==="
+          openssl x509 -in /etc/openvpn/myservername.crt -noout -subject -issuer -dates 2>&1 || true
+          echo "=== TUN device and interface ==="
+          if [ -c /dev/net/tun ]; then ls -l /dev/net/tun; else echo "/dev/net/tun missing or not a character device"; fi
+          ip -brief address show tun0 2>&1 || true
+          echo "=== TCP/1194 listener ==="
+          ss -lntp 2>&1 | grep "1194" || echo "no TCP/1194 listener"
+        ' 2>&1 | python3 -c 'import sys; from capture_caas_worker_diagnostics import redact_text; sys.stdout.write(redact_text(sys.stdin.read()))' > {{ (playbook_dir ~ '/../logs/lab/openvpn/mgmt-server-startup.txt') | quote }}
+      args:
+        executable: /bin/bash
+      environment:
+        PYTHONPATH: "{{ playbook_dir }}/../scripts"
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Fail because mgmt-server OpenVPN did not become active
+      ansible.builtin.fail:
+        msg: >-
+          mgmt-server OpenVPN did not become active after 30 checks. Guest diagnostics were
+          saved to infra/netris/logs/lab/openvpn/mgmt-server-startup.txt and will be included
+          in the CaaS Netris workflow artifacts.
 
 - name: Fix OpenVPN server topology
   shell: |
