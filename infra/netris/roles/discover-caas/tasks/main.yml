@@ -5,8 +5,8 @@
 # isp-server outbound NAT, so that network can't be removed) -- if libvirtd
 # already grabbed its specific-address bind first, the wildcard bind fails
 # outright ("Address already in use"). bind-interfaces makes dnsmasq bind
-# only its named interfaces (br-mgmt here, where the OCP node and discovery
-# agents actually live) instead of the wildcard address.
+# only its named interfaces (br-mgmt here, where the OCP node and Assisted
+# workers reach the service) instead of the wildcard address.
 - name: Ensure dnsmasq listens on br-mgmt for agent DNS
   ansible.builtin.lineinfile:
     path: /etc/dnsmasq.d/ocp-sno.conf
@@ -25,7 +25,7 @@
     state: restarted
   when: _dnsmasq_mgmt is changed
 
-- name: Configure OCP DNS on mgmt-server for agent discovery
+- name: Configure OCP DNS on mgmt-server for Assisted worker registration
   ansible.builtin.shell:
     cmd: |
       ssh -o StrictHostKeyChecking=no root@192.168.16.1 "
@@ -52,7 +52,7 @@
         mkdir -p /run/dnsmasq
         echo 'nameserver {{ dns_server }}' > /run/dnsmasq/resolv.conf
 
-        # Point DHCP DNS to mgmt-server so agents use local dnsmasq
+        # Point DHCP DNS to mgmt-server so worker agents use local dnsmasq
         if grep -q 'option domain-name-servers 192.168.16.1' /etc/dhcp/dhcpd.conf; then
           :
         else
@@ -70,14 +70,14 @@
   register: _mgmt_dns_result
   changed_when: "'true' in _mgmt_dns_result.stdout"
 
-# The discovery agents' default gateway is mgmt-server (servers_gw 192.168.16.1),
+# The Assisted agents' default gateway is mgmt-server (servers_gw 192.168.16.1),
 # but mgmt-server did not forward/NAT their traffic to the OCP ingress. So the
 # agents could reach neither the rootfs (coreos.live.rootfs_url) nor
 # assisted-service at {{ ocp_dnat_ip }}, and discovery stalled with
 # "curl: (7) Couldn't connect to server". mgmt-server can reach {{ ocp_dnat_ip }}
 # itself (via virbr0 -> host -> br-public), so enabling IP forwarding and
 # masquerading the servers network extends that reachability to the agents.
-- name: Enable forwarding and NAT on mgmt-server for discovery agents
+- name: Enable forwarding and NAT on mgmt-server for Assisted agents
   ansible.builtin.shell:
     cmd: |
       ssh -o StrictHostKeyChecking=no root@192.168.16.1 "
@@ -106,13 +106,13 @@
   changed_when: "'true' in _mgmt_forward_result.stdout"
 
 # The cloudsim dhcpd template deliberately omits 'option routers' for the
-# _servers_mgmt subnet, so discovery agents get a management address but no
+# _servers_mgmt subnet, so Assisted agents get a management address but no
 # default route and cannot reach the OCP ingress. Real OCP nodes get their
 # default via the fabric NIC and ignore the DHCP gateway (nmstate
-# auto-gateway/auto-routes: false), but discovery agents only have the
+# auto-gateway/auto-routes: false), but Assisted agents need the
 # management NIC. Add a default route via mgmt-server (which forwards to the
 # ingress) for the servers subnet so the agents can reach assisted-service.
-- name: Give discovery agents a default route via mgmt-server
+- name: Give Assisted agents a default route via mgmt-server
   ansible.builtin.shell:
     cmd: |
       ssh -o StrictHostKeyChecking=no root@192.168.16.1 "
@@ -127,342 +127,6 @@
   register: _mgmt_routers_result
   changed_when: "'true' in _mgmt_routers_result.stdout"
 
-- name: Read SSH public key
-  ansible.builtin.slurp:
-    src: "{{ ssh_public_key_path }}"
-  register: _ssh_pub_key
-
-- name: Read pull secret
-  ansible.builtin.slurp:
-    src: "{{ pull_secret_path }}"
-  register: _pull_secret
-  no_log: true
-
-- name: Regenerate assisted-service auth keypair
-  ansible.builtin.shell:
-    cmd: |
-      oc delete secret assisted-servicelocal-auth -n multicluster-engine --ignore-not-found
-      for i in $(seq 30); do
-        oc get secret assisted-servicelocal-auth -n multicluster-engine --no-headers 2>/dev/null && break
-        sleep 2
-      done
-      sleep 10
-      oc rollout restart deployment/assisted-service -n multicluster-engine
-      oc rollout status deployment/assisted-service -n multicluster-engine --timeout=300s
-      oc rollout restart statefulset/assisted-image-service -n multicluster-engine
-      # assisted-image-service re-caches the RHCOS base images on startup and
-      # serves 503 on /health until they are ready, which can take several
-      # minutes after a restart -- 120s was too short and failed intermittently.
-      oc rollout status statefulset/assisted-image-service -n multicluster-engine --timeout=600s
-  environment:
-    KUBECONFIG: /root/.kube/config
-
-- name: Create InfraEnv namespace
-  ansible.builtin.command:
-    cmd: oc create namespace {{ caas_discovery_infraenv_namespace }}
-  environment:
-    KUBECONFIG: /root/.kube/config
-  register: _ns_create
-  failed_when: false
-  changed_when: _ns_create.rc == 0
-
-- name: Ensure pull-secret exists in InfraEnv namespace
-  ansible.builtin.shell:
-    cmd: >
-      oc get secret pull-secret -n {{ caas_discovery_infraenv_namespace }} ||
-      oc create secret generic pull-secret -n {{ caas_discovery_infraenv_namespace }}
-      --from-literal=.dockerconfigjson='{{ _pull_secret.content | b64decode | trim }}'
-      --type=kubernetes.io/dockerconfigjson
-  environment:
-    KUBECONFIG: /root/.kube/config
-  no_log: true
-  register: _pull_secret_result
-  changed_when: "'created' in _pull_secret_result.stdout"
-  until: _pull_secret_result.rc == 0
-  retries: 10
-  delay: 15
-
-- name: Create InfraEnv CR
-  ansible.builtin.template:
-    src: infraenv.yml.j2
-    dest: /tmp/caas-infraenv.yml
-    mode: "0600"
-
-- name: Delete existing InfraEnv to regenerate ISO token
-  ansible.builtin.command:
-    cmd: oc delete infraenv {{ caas_discovery_infraenv_name }} -n {{ caas_discovery_infraenv_namespace }} --ignore-not-found
-  environment:
-    KUBECONFIG: /root/.kube/config
-  changed_when: true
-
-- name: Apply InfraEnv CR
-  ansible.builtin.command:
-    cmd: oc apply -f /tmp/caas-infraenv.yml
-  environment:
-    KUBECONFIG: /root/.kube/config
-  register: _infraenv_apply
-  changed_when: "'created' in _infraenv_apply.stdout or 'configured' in _infraenv_apply.stdout"
-  until: _infraenv_apply.rc == 0
-  retries: 10
-  delay: 15
-
-- name: Wait for discovery ISO URL
-  ansible.builtin.shell:
-    cmd: oc get infraenv {{ caas_discovery_infraenv_name }} -n {{ caas_discovery_infraenv_namespace }} -o jsonpath='{.status.isoDownloadURL}'
-  register: _iso_url
-  until: _iso_url.stdout | length > 0
-  retries: 60
-  delay: 10
-  changed_when: false
-
-- name: Download discovery ISO
-  ansible.builtin.get_url:
-    url: "{{ _iso_url.stdout }}"
-    dest: /var/lib/libvirt/images/caas-discovery.iso
-    mode: "0644"
-    validate_certs: false
-  register: _iso_download
-  until: _iso_download is success
-  retries: 30
-  delay: 10
-
-- name: Find discovery VMs
-  ansible.builtin.shell:
-    cmd: virsh list --all --name | grep "{{ item }}"
-  register: _discovery_vm_lookup
-  changed_when: false
-  loop: "{{ caas_discovery_vm_patterns }}"
-
-- name: Build VM name list
-  ansible.builtin.set_fact:
-    caas_discovery_vms: "{{ _discovery_vm_lookup.results | map(attribute='stdout_lines') | map('first') | list }}"
-
-- name: Get VM states
-  ansible.builtin.shell:
-    cmd: virsh domstate {{ item }}
-  register: _vm_states
-  changed_when: false
-  loop: "{{ caas_discovery_vms }}"
-
-- name: Shut down running VMs
-  ansible.builtin.command:
-    cmd: virsh destroy {{ item.item }}
-  when: item.stdout | trim == 'running'
-  loop: "{{ _vm_states.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-  changed_when: true
-
-- name: Get current vCPU count
-  ansible.builtin.shell:
-    cmd: virsh vcpucount {{ item }} --config --maximum
-  register: _current_vcpus
-  changed_when: false
-  loop: "{{ caas_discovery_vms }}"
-
-- name: Set maximum vCPUs
-  ansible.builtin.command:
-    cmd: virsh setvcpus {{ item.item }} {{ caas_discovery_vcpu_overrides[item.item] | default(caas_discovery_vcpu) }} --config --maximum
-  when: item.stdout | int != (caas_discovery_vcpu_overrides[item.item] | default(caas_discovery_vcpu)) | int
-  loop: "{{ _current_vcpus.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-  changed_when: true
-
-- name: Set vCPUs
-  ansible.builtin.command:
-    cmd: virsh setvcpus {{ item.item }} {{ caas_discovery_vcpu_overrides[item.item] | default(caas_discovery_vcpu) }} --config
-  when: item.stdout | int != (caas_discovery_vcpu_overrides[item.item] | default(caas_discovery_vcpu)) | int
-  loop: "{{ _current_vcpus.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-  changed_when: true
-
-- name: Get current max memory
-  ansible.builtin.shell:
-    cmd: virsh dommemstat {{ item }} | awk '/actual/{print int($2/1024)}'
-  register: _current_memory
-  changed_when: false
-  loop: "{{ caas_discovery_vms }}"
-
-- name: Set maximum memory
-  ansible.builtin.command:
-    cmd: >-
-      virsh setmaxmem {{ item.item }}
-      {{ caas_discovery_memory_mb_overrides[item.item] | default(caas_discovery_memory_mb) }}M
-      --config
-  when: >-
-    item.stdout | int !=
-    (caas_discovery_memory_mb_overrides[item.item] | default(caas_discovery_memory_mb)) | int
-  loop: "{{ _current_memory.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-  changed_when: true
-
-- name: Set memory
-  ansible.builtin.command:
-    cmd: >-
-      virsh setmem {{ item.item }}
-      {{ caas_discovery_memory_mb_overrides[item.item] | default(caas_discovery_memory_mb) }}M
-      --config
-  when: >-
-    item.stdout | int !=
-    (caas_discovery_memory_mb_overrides[item.item] | default(caas_discovery_memory_mb)) | int
-  loop: "{{ _current_memory.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-  changed_when: true
-
-- name: Detach all existing disks
-  ansible.builtin.shell:
-    cmd: |
-      for target in $(virsh domblklist {{ item }} | awk 'NR>2 && NF>1 {print $1}'); do
-        virsh detach-disk {{ item }} "$target" --config 2>/dev/null || true
-      done
-  loop: "{{ caas_discovery_vms }}"
-  changed_when: true
-
-- name: Create empty boot disk for each VM
-  ansible.builtin.command:
-    cmd: qemu-img create -f qcow2 /var/lib/libvirt/images/{{ item }}-disk.qcow2 {{ caas_discovery_disk_gb }}G
-    creates: /var/lib/libvirt/images/{{ item }}-disk.qcow2
-  loop: "{{ caas_discovery_vms }}"
-
-- name: Check if boot disk is attached
-  ansible.builtin.shell:
-    cmd: virsh domblklist {{ item }} | grep -q '{{ item }}-disk.qcow2'
-  register: _boot_disk_attached
-  failed_when: false
-  changed_when: false
-  loop: "{{ caas_discovery_vms }}"
-
-- name: Attach boot disk
-  ansible.builtin.command:
-    cmd: virsh attach-disk {{ item.item }} /var/lib/libvirt/images/{{ item.item }}-disk.qcow2 vda --persistent --subdriver qcow2
-  when: item.rc != 0
-  loop: "{{ _boot_disk_attached.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-  changed_when: true
-
-- name: Check if discovery ISO is attached
-  ansible.builtin.shell:
-    cmd: virsh domblklist {{ item }} | grep -q 'caas-discovery.iso'
-  register: _iso_attached
-  failed_when: false
-  changed_when: false
-  loop: "{{ caas_discovery_vms }}"
-
-- name: Attach discovery ISO as cdrom
-  ansible.builtin.command:
-    cmd: virsh attach-disk {{ item.item }} /var/lib/libvirt/images/caas-discovery.iso sda --type cdrom --config
-  when: item.rc != 0
-  loop: "{{ _iso_attached.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-  changed_when: true
-
-- name: Set boot order (per-VM override, default disk then cdrom)
-  ansible.builtin.command:
-    cmd: virt-xml {{ item }} --edit --boot {{ caas_discovery_vm_overrides[item].boot_order | default('hd,cdrom') }}
-  loop: "{{ caas_discovery_vms }}"
-  register: _boot_order
-  changed_when: "'--boot' not in _boot_order.stderr | default('')"
-
-# Per-VM discovery experiments (caas_discovery_vm_overrides). No-op unless set.
-# Detach requested NICs before boot so each VM can run a different network
-# config in the same run; diagnostics then show which config registers.
-- name: Apply per-VM discovery experiment — detach networks
-  ansible.builtin.shell:
-    cmd: |
-      set -e
-      VM="{{ item.0.key }}"
-      NET="{{ item.1 }}"
-      MAC=$(virsh domiflist "$VM" | awk -v n="$NET" '$3 == n {print $5; exit}')
-      if [ -n "$MAC" ]; then
-        virsh detach-interface "$VM" network --mac "$MAC" --config
-        echo "experiment: detached ${NET} (${MAC}) from ${VM}"
-      else
-        echo "experiment: no ${NET} NIC on ${VM}; nothing to detach"
-      fi
-    executable: /bin/bash
-  loop: "{{ caas_discovery_vm_overrides | default({}) | dict2items | subelements('value.detach_networks', skip_missing=True) }}"
-  loop_control:
-    label: "{{ item.0.key }} detach {{ item.1 }}"
-  register: _discovery_experiment_detach
-  changed_when: "'detached' in _discovery_experiment_detach.stdout | default('')"
-
-- name: Report applied discovery experiments
-  ansible.builtin.debug:
-    msg: "{{ _discovery_experiment_detach.results | map(attribute='stdout') | select('string') | list }}"
-  when: caas_discovery_vm_overrides | default({}) | length > 0
-
-# bmc-net is not used during assisted discovery (agents register over the
-# management network). Its libvirt network is Mode: none (isolated) but
-# DHCP-enabled, so it hands out a default route (10.99.0.1) that competes with
-# and beats the management NIC's. The agents then route to the OCP ingress via
-# bmc-net -- which goes nowhere -- so the rootfs fetch and registration fail
-# with "curl: (7) Couldn't connect to server" (confirmed: mgmt-server sees no
-# conntrack to the ingress). Detach bmc-net for discovery so the management NIC
-# is the sole default route, which mgmt-server forwards to the ingress.
-- name: Detach bmc-net from discovery VMs so it does not hijack the default route
-  ansible.builtin.shell:
-    cmd: |
-      set +e
-      VM="{{ item }}"
-      MAC=$(virsh domiflist "$VM" | awk -v n="{{ bmc_net_name }}" '$3 == n {print $5; exit}')
-      if [ -n "$MAC" ]; then
-        virsh detach-interface "$VM" network --mac "$MAC" --config && echo "detached {{ bmc_net_name }} ($MAC) from $VM"
-      else
-        echo "no {{ bmc_net_name }} NIC on $VM; nothing to detach"
-      fi
-    executable: /bin/bash
-  loop: "{{ caas_discovery_vms }}"
-  when: bare_metal_services | default(false) | bool
-  register: _detach_bmc_net
-  changed_when: "'detached' in _detach_bmc_net.stdout | default('')"
-
-- name: Start discovery VMs
-  ansible.builtin.command:
-    cmd: virsh start {{ item }}
-  loop: "{{ caas_discovery_vms }}"
-  register: _vm_start
-  failed_when: _vm_start.rc != 0 and 'already active' not in _vm_start.stderr
-  changed_when: _vm_start.rc == 0
-
-- name: Report CaaS discovery hosts started
-  ansible.builtin.debug:
-    msg: >-
-      CaaS discovery: {{ caas_discovery_vms | length }} VMs booted with discovery ISO
-      ({{ caas_discovery_vcpu }} vCPU, {{ caas_discovery_memory_mb }}MB RAM,
-      {{ caas_discovery_disk_gb }}GB disk; default boot order disk,cdrom,
-      per-VM overrides: {{ caas_discovery_vm_overrides | default({}) }})
-
-# Capture each VM's serial console for the first ~150s of boot. The agent gets
-# stuck fetching the rootfs in the initramfs stage (no ssh / guest-agent), so
-# this early window is the only place the dracut network setup -- which NICs
-# come up, DHCP results, the default route, DNS -- is visible. Written to a
-# directory the archive step uploads. Best-effort; never fails the play.
-- name: Create discovery early-boot log directory
-  ansible.builtin.file:
-    path: "{{ playbook_dir }}/../logs/caas-discovery-boot"
-    state: directory
-    mode: "0755"
-  failed_when: false
-
-- name: Capture discovery VM early-boot serial console
-  ansible.builtin.shell:
-    cmd: |
-      set +e
-      VM="{{ item }}"
-      OUT="{{ playbook_dir }}/../logs/caas-discovery-boot/vm-${VM}-earlyboot.txt"
-      if command -v script >/dev/null 2>&1; then
-        timeout 155s script -q -c "timeout --signal=INT 150s virsh console --force --safe '$VM'" /dev/null > "$OUT" 2>&1
-      else
-        echo "util-linux script unavailable; cannot capture serial console" > "$OUT"
-      fi
-      exit 0
-    executable: /bin/bash
-  loop: "{{ caas_discovery_vms }}"
-  changed_when: false
-  failed_when: false
+- name: Boot workers with the shared discovery InfraEnv when requested
+  ansible.builtin.include_tasks: discover-workers.yml
+  when: not (caas_use_order_infraenv_for_worker_boot | default(true) | bool)

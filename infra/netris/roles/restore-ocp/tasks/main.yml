@@ -494,7 +494,7 @@
 - name: Set SSH command prefix
   ansible.builtin.set_fact:
     _ssh_cmd: >-
-      ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10
       -i {{ snapshot_flavor_dir }}/crypto/cluster-tool.key
       core@{{ _vm_ssh_ip }}
 

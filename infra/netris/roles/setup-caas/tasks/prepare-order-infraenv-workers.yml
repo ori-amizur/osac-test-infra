@@ -1,0 +1,159 @@
+---
+- name: Resolve CaaS worker VM names
+  ansible.builtin.include_role:
+    name: discover-caas
+    tasks_from: find-worker-vms.yml
+
+- name: Build static worker-to-BMH selection for ClusterOrder boot
+  ansible.builtin.shell: |
+    python3 <<'PY'
+    import json
+    import os
+    import re
+
+    worker_vms = json.loads(os.environ["CAAS_WORKER_VMS_JSON"])
+    mappings = json.loads(os.environ["CAAS_AGENT_MAPPINGS_JSON"])
+    hostname_filter = json.loads(os.environ["CAAS_HOSTNAME_FILTER_JSON"])
+    compiled = []
+
+    for mapping in mappings:
+        pattern = mapping.get("vm_pattern", "")
+        server_name = mapping.get("netris_server_name", "")
+        if not pattern or not server_name:
+            raise SystemExit(f"invalid caas_agents mapping: {mapping!r}")
+        try:
+            compiled.append((mapping, re.compile(pattern)))
+        except re.error as exc:
+            raise SystemExit(f"invalid caas_agents VM pattern {pattern!r}: {exc}") from exc
+
+    vm_to_server = {}
+    for vm in worker_vms:
+        matches = [mapping for mapping, pattern in compiled if pattern.search(vm)]
+        if len(matches) != 1:
+            raise SystemExit(f"CaaS VM {vm!r} matched {len(matches)} caas_agents mappings; expected one")
+        vm_to_server[vm] = matches[0]["netris_server_name"]
+
+    if len(set(vm_to_server.values())) != len(vm_to_server):
+        raise SystemExit(f"multiple CaaS VMs map to the same Netris server: {vm_to_server}")
+
+    selected = []
+    matched_filters = set()
+    for vm, server_name in vm_to_server.items():
+        mapping, pattern = next(
+            (mapping, pattern)
+            for mapping, pattern in compiled
+            if pattern.search(vm) and mapping["netris_server_name"] == server_name
+        )
+        if not hostname_filter:
+            selected.append(vm)
+            continue
+        matches_filter = [
+            value for value in hostname_filter
+            if value in (vm, server_name) or pattern.search(value)
+        ]
+        if matches_filter:
+            selected.append(vm)
+            matched_filters.update(matches_filter)
+
+    unmatched_filters = sorted(set(hostname_filter) - matched_filters)
+    if unmatched_filters:
+        raise SystemExit(f"CaaS hostname filter matched no configured worker: {unmatched_filters}")
+    if not selected:
+        raise SystemExit("CaaS worker hostname filter selected no BMHs")
+
+    print(json.dumps({
+        "worker_vms": worker_vms,
+        "agent_names": worker_vms,
+        "agent_hostname_map": {vm: vm for vm in worker_vms},
+        "selected_agents": selected,
+        "vm_to_server": vm_to_server,
+    }))
+    PY
+  environment:
+    CAAS_WORKER_VMS_JSON: "{{ caas_discovery_vms | to_json }}"
+    CAAS_AGENT_MAPPINGS_JSON: "{{ caas_agents | to_json }}"
+    CAAS_HOSTNAME_FILTER_JSON: "{{ caas_resource_class_hostnames | default([]) | to_json }}"
+  register: _caas_order_worker_map_raw
+  changed_when: false
+
+- name: Store static worker selection for BMH labeling
+  ansible.builtin.set_fact:
+    _caas_order_worker_map: "{{ _caas_order_worker_map_raw.stdout | from_json }}"
+    caas_agent_names: "{{ (_caas_order_worker_map_raw.stdout | from_json).agent_names }}"
+    _agent_hostname_map: "{{ (_caas_order_worker_map_raw.stdout | from_json).agent_hostname_map }}"
+    _agents_for_resource_class: "{{ (_caas_order_worker_map_raw.stdout | from_json).selected_agents }}"
+
+- name: Show ClusterOrder worker-to-BMH mapping
+  ansible.builtin.debug:
+    msg: >-
+      ClusterOrder InfraEnv boot will use worker VMs
+      {{ _agents_for_resource_class }} with Netris mappings {{ _caas_order_worker_map.vm_to_server }}.
+
+- name: Label and validate CaaS BareMetalHosts for the OSAC allocator
+  ansible.builtin.include_tasks: label-worker-bmhs.yml
+
+- name: Read current desired power state for CaaS worker BMHs
+  ansible.builtin.command:
+    argv:
+      - oc
+      - get
+      - bmh/{{ item }}
+      - -n
+      - "{{ bmaas_bmh_namespace }}"
+      - -o
+      - jsonpath={.spec.online}
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _caas_worker_bmh_online
+  changed_when: false
+  loop: "{{ caas_discovery_vms }}"
+
+- name: Ask Metal3 to power off CaaS worker BMHs
+  ansible.builtin.command:
+    argv:
+      - oc
+      - patch
+      - bmh/{{ item.item }}
+      - -n
+      - "{{ bmaas_bmh_namespace }}"
+      - --type=merge
+      - -p
+      - '{"spec":{"online":false}}'
+  environment:
+    KUBECONFIG: /root/.kube/config
+  when: item.stdout | trim != 'false'
+  register: _caas_worker_bmh_poweroff
+  changed_when: true
+  loop: "{{ _caas_worker_bmh_online.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Wait for Metal3 to report CaaS worker BMHs powered off
+  ansible.builtin.command:
+    argv:
+      - oc
+      - get
+      - bmh/{{ item }}
+      - -n
+      - "{{ bmaas_bmh_namespace }}"
+      - -o
+      - jsonpath={.status.poweredOn}
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _caas_worker_bmh_powered_on
+  until: >-
+    _caas_worker_bmh_powered_on.rc == 0 and
+    _caas_worker_bmh_powered_on.stdout | trim == 'false'
+  retries: 60
+  delay: 5
+  changed_when: false
+  loop: "{{ caas_discovery_vms }}"
+  loop_control:
+    label: "{{ item }}"
+
+# Keep bmc-net attached: Metal3 uses this lifecycle interface while IPA writes
+# the worker BMI. Only the legacy shared-InfraEnv boot detaches it.
+- name: Prepare worker hardware without booting the shared discovery ISO
+  ansible.builtin.include_role:
+    name: discover-caas
+    tasks_from: prepare-worker-vms.yml

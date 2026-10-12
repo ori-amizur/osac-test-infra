@@ -1,0 +1,193 @@
+---
+# Step 1: Wait for all agents to register from the discovery ISO boot.
+# Budget ~22.5 min (90 x 15s) so the rescue diagnostics still run within the
+# 30-minute step timeout if the agents never register.
+- name: Wait for discovery agents to register
+  block:
+    - name: Wait for expected number of agents
+      ansible.builtin.shell:
+        cmd: oc get agent -n {{ caas_agent_namespace }} --no-headers 2>/dev/null | wc -l
+      environment:
+        KUBECONFIG: /root/.kube/config
+      register: _agent_count
+      until: _agent_count.stdout | int >= caas_agents | length
+      retries: 90
+      delay: 15
+      changed_when: false
+  rescue:
+    - name: Capture CaaS discovery diagnostics
+      ansible.builtin.include_tasks: discovery-diagnostics.yml
+
+    - name: Fail because discovery agents did not register
+      ansible.builtin.fail:
+        msg: >-
+          Only {{ _agent_count.stdout | default('0') | trim }} of
+          {{ caas_agents | length }} discovery agents registered with
+          assisted-service before the timeout. Diagnostics saved to
+          {{ _caas_discovery_diag_dir }}.
+
+- name: Get agent names
+  ansible.builtin.shell:
+    cmd: oc get agent -n {{ caas_agent_namespace }} -o jsonpath='{.items[*].metadata.name}'
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _agent_names
+  changed_when: false
+  until: _agent_names.rc == 0 and _agent_names.stdout | length > 0
+  retries: 10
+  delay: 15
+
+- name: Set agent name list
+  ansible.builtin.set_fact:
+    caas_agent_names: "{{ _agent_names.stdout.split() }}"
+
+# Step 2: Label agents with resource class and netris server name
+# Agent CRs appear before status.inventory is populated; wait until every
+# expected agent has a hostname before building the label map.
+- name: Get agent hostnames
+  ansible.builtin.shell:
+    cmd: |
+      oc get agent -n {{ caas_agent_namespace }} -o json | python3 -c '
+      import json, sys
+      agents = json.load(sys.stdin).get("items") or []
+      expected = {{ caas_agents | length }}
+      if len(agents) < expected:
+          raise SystemExit(f"only {len(agents)}/{expected} agents present")
+      missing = [
+          a["metadata"]["name"]
+          for a in agents
+          if not ((a.get("status") or {}).get("inventory") or {}).get("hostname")
+      ]
+      if missing:
+          raise SystemExit("inventory hostname missing for: " + ",".join(missing))
+      print(json.dumps({
+          a["metadata"]["name"]: a["status"]["inventory"]["hostname"]
+          for a in agents
+      }))
+      '
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _agent_hostnames_raw
+  until: _agent_hostnames_raw.rc == 0
+  retries: 40
+  delay: 15
+  changed_when: false
+
+- name: Build agent-to-hostname map
+  ansible.builtin.set_fact:
+    _agent_hostname_map: "{{ _agent_hostnames_raw.stdout | from_json }}"
+
+# caas_resource_class_hostnames empty → all agents (CaaS). Non-empty → only those
+# inventory hostnames get resource_class (MaaS defaults to h02+h03).
+- name: Build resource_class agent allow-list by hostname
+  ansible.builtin.set_fact:
+    _agents_for_resource_class: >-
+      {{
+        caas_agent_names
+        if (caas_resource_class_hostnames | default([]) | length) == 0 else
+        (
+          _agent_hostname_map
+          | dict2items
+          | selectattr('value', 'in', caas_resource_class_hostnames)
+          | map(attribute='key')
+          | list
+        )
+      }}
+
+- name: Show resource_class labeling plan
+  ansible.builtin.debug:
+    msg: >-
+      resource_class={{ caas_host_type_id }} on
+      {{ _agents_for_resource_class | length }}/{{ caas_agent_names | length }} agents
+      (filter={{ caas_resource_class_hostnames | default([]) }})
+
+- name: Fail if resource_class hostname filter matched no agents
+  ansible.builtin.fail:
+    msg: >-
+      caas_resource_class_hostnames={{ caas_resource_class_hostnames }} matched 0 agents.
+      Known hostnames: {{ _agent_hostname_map.values() | list }}
+  when:
+    - (caas_resource_class_hostnames | default([]) | length) > 0
+    - (_agents_for_resource_class | length) == 0
+
+# Agents in the discovery InfraEnv identify candidate machines. The BMF
+# allocator selects Metal3 BareMetalHosts in bmaas_bmh_namespace, so the same
+# instance-type selector must be present on those BMHs as well.
+- name: Label and validate CaaS BareMetalHosts for the OSAC allocator
+  ansible.builtin.include_tasks: label-worker-bmhs.yml
+
+- name: Label agent with resource class
+  ansible.builtin.command:
+    cmd: >-
+      oc label agent/{{ item }} -n {{ caas_agent_namespace }}
+      osac.openshift.io/resource_class={{ caas_host_type_id }}
+      --overwrite
+  environment:
+    KUBECONFIG: /root/.kube/config
+  loop: "{{ _agents_for_resource_class }}"
+  register: _label_rc
+  changed_when: "'labeled' in _label_rc.stdout and 'not labeled' not in _label_rc.stdout"
+  until: _label_rc.rc == 0
+  retries: 5
+  delay: 10
+
+- name: Remove resource_class from agents outside the allow-list
+  ansible.builtin.command:
+    cmd: >-
+      oc label agent/{{ item }} -n {{ caas_agent_namespace }}
+      osac.openshift.io/resource_class- --overwrite
+  environment:
+    KUBECONFIG: /root/.kube/config
+  when:
+    - (caas_resource_class_hostnames | default([]) | length) > 0
+    - item not in _agents_for_resource_class
+  loop: "{{ caas_agent_names }}"
+  register: _unlabel_rc
+  changed_when: "'labeled' in _unlabel_rc.stdout or 'unlabeled' in _unlabel_rc.stdout"
+  failed_when: false
+
+- name: Label agent with netris server name
+  ansible.builtin.command:
+    cmd: >-
+      oc label agent/{{ item.key }} -n {{ caas_agent_namespace }}
+      netris.server/name={{ (caas_agents | selectattr('vm_pattern', 'search', item.value) | first).netris_server_name }}
+      --overwrite
+  environment:
+    KUBECONFIG: /root/.kube/config
+  loop: "{{ _agent_hostname_map | dict2items }}"
+  loop_control:
+    label: "{{ item.value }}"
+  register: _label_ns
+  changed_when: "'labeled' in _label_ns.stdout and 'not labeled' not in _label_ns.stdout"
+  until: _label_ns.rc == 0
+  retries: 5
+  delay: 10
+
+- name: Check agent approval status
+  ansible.builtin.shell:
+    cmd: oc get agent/{{ item }} -n {{ caas_agent_namespace }} -o jsonpath='{.spec.approved}'
+  environment:
+    KUBECONFIG: /root/.kube/config
+  register: _agent_approved
+  changed_when: false
+  until: _agent_approved.rc == 0
+  retries: 5
+  delay: 10
+  loop: "{{ _agents_for_resource_class }}"
+
+- name: Approve agents
+  ansible.builtin.command:
+    cmd: >-
+      oc patch agent/{{ item.item }} -n {{ caas_agent_namespace }}
+      --type=merge -p '{"spec":{"approved":true}}'
+  environment:
+    KUBECONFIG: /root/.kube/config
+  when: item.stdout != 'true'
+  loop: "{{ _agent_approved.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  register: _approve_result
+  until: _approve_result.rc == 0
+  retries: 5
+  delay: 10
+  changed_when: true

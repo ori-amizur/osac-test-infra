@@ -78,9 +78,11 @@ ns_fabric:
   enable: 1
   leaf_count: 2
   leaf_port_count: 64
-  leaf_port_breakout: 4
+  # Cloudsim exposes one Cumulus swpN interface per NIC, without breakout lanes.
+  leaf_port_breakout: 1
   leaf_to_spine_link_count: 4
-  leaf_to_spine_start_port: 192
+  # Reserve swp45-swp60 for leaf-to-spine links.
+  leaf_to_spine_start_port: 44
   oob_leaf_count: 1
   oob_first_gpu_port: 0
   oob_gpu_per_switch: 4
@@ -90,10 +92,11 @@ ns_fabric:
   bgp_prefix_list_outbound: "permit 0.0.0.0/0 le 32"
   softgate_leaf_list: "[0, 1]"
   softgate_node_type: "softgate_hs"     # installer requires _hs to find the package; dpdk disabled post-install
-  leaf_to_softgate_start_port: 176
+  # Reserve swp37-swp40 for softgate links.
+  leaf_to_softgate_start_port: 36
   spine_count: 2
   spine_port_count: 64
-  spine_port_breakout: 4
+  spine_port_breakout: 1
   lo_subnet: "10.2.0.0/16"
   mgmt_subnet: "10.3.0.0/16"
   gpu_server_ns_subnet: "192.168.0.0/21"

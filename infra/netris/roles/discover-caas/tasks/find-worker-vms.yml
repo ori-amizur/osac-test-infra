@@ -1,0 +1,36 @@
+---
+- name: Resolve configured CaaS worker VM names
+  ansible.builtin.shell: |
+    python3 <<'PY'
+    import json
+    import os
+    import re
+    import subprocess
+
+    patterns = json.loads(os.environ["CAAS_VM_PATTERNS_JSON"])
+    vm_names = subprocess.run(
+        ["virsh", "list", "--all", "--name"], check=True, capture_output=True, text=True
+    ).stdout.splitlines()
+
+    resolved = []
+    for pattern in patterns:
+        try:
+            matches = [name for name in vm_names if re.search(pattern, name)]
+        except re.error as exc:
+            raise SystemExit(f"invalid CaaS VM pattern {pattern!r}: {exc}") from exc
+        if len(matches) != 1:
+            raise SystemExit(f"CaaS VM pattern {pattern!r} matched {len(matches)} VMs: {matches}")
+        if matches[0] in resolved:
+            raise SystemExit(f"multiple CaaS VM patterns resolve to {matches[0]!r}")
+        resolved.append(matches[0])
+
+    print(json.dumps(resolved))
+    PY
+  environment:
+    CAAS_VM_PATTERNS_JSON: "{{ caas_discovery_vm_patterns | to_json }}"
+  register: _caas_worker_vm_names_raw
+  changed_when: false
+
+- name: Store configured CaaS worker VM names
+  ansible.builtin.set_fact:
+    caas_discovery_vms: "{{ _caas_worker_vm_names_raw.stdout | from_json }}"

@@ -2,7 +2,7 @@
 # Force-clean leftovers after destroy-caas (no graceful wait — equivalent to
 # destroy-caas.sh --now). Strips stuck HostedCluster / ClusterOrder / ManagedCluster
 # and related namespaces (incl. HCP ns + ghost ns with Terminating pods/deploys),
-# deletes leftover order-* apps LB services, detaches/wipes discovery worker VMs,
+# deletes leftover order-* apps LB services, detaches/wipes CaaS worker VMs,
 # sweeps orphan Netris order-* server clusters and VPCs.
 
 - name: Resolve OSAC namespace for force destroy
@@ -206,7 +206,7 @@
   failed_when: false
   changed_when: true
 
-- name: Wipe discovery worker VMs (detach disks/ISO + remove qcow2)
+- name: Wipe CaaS worker VMs (detach disks/ISO + remove qcow2)
   ansible.builtin.shell: |
     set -euo pipefail
     vm="{{ item }}"

@@ -1,6 +1,7 @@
 all:
   vars:
-    dns_server: "8.8.8.8"
+    # Internal resolver reachable from VMs in this isolated lab.
+    dns_server: "10.11.5.160"
   hosts:
     lab:
       ansible_connection: local

@@ -135,6 +135,7 @@ Key settings to configure:
 | `controller_password` | Netris API password (default: `newNet0ps`) |
 | `controller_backend_version` | Netris controller backend image tag used for agent installation (required, e.g. `4.16.0-008`) |
 | `controller_site` | Netris site name to simulate (default: `Air`) |
+| `create_empty_ports` | Create disconnected NICs for unused ports to preserve Netris switch port indices |
 | `hypers_ssh_user` | SSH user for hypervisors (default: `ubuntu`) |
 | `servers_gw` | Management subnet CIDR for servers |
 | `bgp_link_subnet` | /29 subnet for BGP peering between simulated ISP and softgates |

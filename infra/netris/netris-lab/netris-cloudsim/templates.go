@@ -55,8 +55,7 @@ xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
   <model type="virtio"/>
 </interface>
 {{- else if and (eq $value.RemoteID 0) (eq $value.LocalID 0) $dot.CreateEmptyPorts }}
-<interface type='bridge'>
-  <source bridge='virbr0'/>
+<interface type='ethernet'>
   <model type='virtio'/>
   <link state="down"/>
 </interface>

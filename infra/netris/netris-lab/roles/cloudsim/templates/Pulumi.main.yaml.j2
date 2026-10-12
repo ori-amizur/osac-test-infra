@@ -4,6 +4,8 @@ config:
   netris-air:controller_backend_version: {{ netris_controller_images.backend }}
   netris-air:controller_insecure: false
   netris-air:controller_site: {{ site_name }}
+  # Keep guest NIC indices aligned with sparse and breakout Netris port numbering.
+  netris-air:create_empty_ports: true
   netris-air:hypers_list:
     - 127.0.0.1
   netris-air:hypers_ssh_user: {{ hypers_ssh_user }}

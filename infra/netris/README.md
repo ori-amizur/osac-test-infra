@@ -11,7 +11,7 @@ The [netris-lab](https://github.com/danmanor/netris-lab) deploys a full simulate
 - **4 softgate VMs** — provide NAT/L4LB and BGP peering for internet access
 - **4 server VMs** (hgx-00 to hgx-03) — simulated GPU servers, managed by Netris
 
-This repo takes the first server (hgx-00), resizes it for OCP, configures Netris networking (VPC, VNet, Subnet), and installs OpenShift SNO on it using the Assisted Installer. For CaaS testing, the remaining three servers (hgx-01 to hgx-03) are booted with a discovery ISO and registered as agents for cluster provisioning.
+This repo takes the first server (hgx-00), resizes it for OCP, configures Netris networking (VPC, VNet, Subnet), and installs OpenShift SNO on it using the Assisted Installer. For CaaS, the remaining three servers are prepared as BMaaS hosts and selected by BMH labels. OSAC creates the ClusterOrder InfraEnv in the workload namespace and passes its ignition to worker provisioning, so each Agent registers directly in the namespace the order reconciler watches. MaaS retains the shared discovery-InfraEnv flow for selecting its worker hosts.
 
 ```
 Bare-metal host
@@ -23,10 +23,12 @@ Bare-metal host
     │   ├── VPC/VNet/Subnet configured via Netris API
     │   ├── OCP SNO installed via Assisted Installer
     │   └── OSAC deployed on top
-    └── hgx-01..03 (CaaS only: 4 vCPU, 16G RAM, 100G disk)
-        ├── Booted with discovery ISO from InfraEnv
-        ├── Registered as agents with resource_class + netris.server/name
-        └── Used to provision a CaaS cluster via fulfillment API
+    └── hgx-01..03 (CaaS workers; BMaaS BareMetalHosts)
+        ├── Preselected with the CaaS worker resource-class label
+        ├── Metal3 is asked to power them off until OSAC provisions their BareMetalInstances
+        ├── Metal3 IPA installs the BMI while the lifecycle NIC is attached
+        ├── BMI boots with the ClusterOrder-specific ignition
+        └── Register order-bound Agents mapped to Netris servers by hostname
 ```
 
 Internet access for OCP image pulls flows through: hgx-00 → NS VNet → softgate SNAT → host iptables masquerade → internet.
@@ -77,9 +79,15 @@ make deploy
 make deploy-fast
 
 # Then run a test flow
-make setup-caas    # CaaS setup: discover hosts, label Agents and BMHs, register worker inventory
+make setup-caas    # CaaS setup: prelabel BMHs and publish worker catalog; no shared discovery boot
 make deploy-caas   # CaaS: create cluster
 ```
+
+`deploy-caas` creates the ClusterOrder in the workload namespace. OSAC then
+creates that order's InfraEnv and provisions the selected BMaaS hosts with its
+ignition. Those workers register as Agents in the order namespace; the Netris
+AAP role maps their inventory hostnames to server names using the patterns
+added to `NETRIS_RESOURCE_CLASS_MAP` by `setup-caas`.
 
 After deployment, the kubeconfig is at `/root/.kube/config`.
 
@@ -100,29 +108,37 @@ After deployment, the kubeconfig is at `/root/.kube/config`.
 
 | Target | Description | Time |
 |--------|-------------|------|
-| `make setup-caas` | Discover hosts, label discovery Agents and matching BMaaS BareMetalHosts, validate the worker inventory, ensure shared CaaS catalog entries, and configure the OSAC CLI | ~30 min |
+| `make setup-caas` | Label the configured BMaaS BareMetalHosts, ask Metal3 to power them off, validate worker inventory, ensure shared CaaS catalog entries, and configure the OSAC CLI | ~30 min |
 | `make deploy-caas` | Create CaaS cluster using `ocp_ci_small` template | ~60 min |
 | `make setup-maas` | Same as setup-caas with MaaS host type / sizing; labels only `MAAS_LABEL_HOSTNAMES` (default h02+h03) with `g5` | ~30 min |
 | `make deploy-maas` | Create MaaS cluster (`ocp_4_20_ai_maas` + `-p` template params) | ~60 min |
 
-The first discovery boot uses the shared InfraEnv in `hardware-inventory` to
-identify candidate machines. `setup-caas` labels those discovery Agents and the
-corresponding BareMetalHosts in `host-inventory`; BMF allocates from the latter
-using the BareMetalInstanceType's host-label selector. An Agent label alone does
-not make a BareMetalHost allocatable.
+For CaaS, `setup-caas` maps the configured VM names to BMaaS BareMetalHosts in
+`host-inventory` and applies the BareMetalInstanceType selector labels. It asks
+Metal3 to power off those hosts (`spec.online: false`) and waits for that power
+state before resetting their VM disks. This avoids Metal3 immediately powering
+the VMs back on after a host-side shutdown. It does not boot an Assisted ISO or
+create discovery Agents. BMF allocates from the labeled BMHs when OSAC provisions
+the ClusterOrder's worker BMIs; that provisioning sets the BMH online and passes
+the order InfraEnv ignition as user data.
 
-After a ClusterOrder is created, OSAC creates an order-specific InfraEnv in the
-ClusterOrder namespace. It passes that InfraEnv's ignition as the worker BMI's
-user data, and the Metal3 provisioning workflow writes it to the selected BMH
-before provisioning. The installed worker should then register as an Agent in
-the ClusterOrder namespace. For the CI workflow that namespace is
-`osac-e2e-ci`; the original Agents in `hardware-inventory` remain discovery
-inventory. Failure artifacts collect InfraEnvs and Agents from both namespaces.
-The Netris workflow also starts serial-console capture before ClusterOrder
-provisioning and stops it after deployment/tests. Its
+OSAC creates the ClusterOrder-specific InfraEnv in the ClusterOrder namespace
+and passes its ignition as worker BMI user data. Metal3 first boots its IPA
+ramdisk to install the BMI; the lifecycle NIC stays attached for that step.
+The installed worker then boots with the order ignition, and Assisted Service
+creates its Agent in the order namespace.
+For the CI workflow that namespace is `osac-e2e-ci`. The Netris AAP role maps
+those Agents' inventory hostnames to Netris server names using the optional
+`agent_server_name_patterns` in `NETRIS_RESOURCE_CLASS_MAP`, then labels the
+Agents before creating the fabric resources. MaaS continues to boot the shared
+InfraEnv in `hardware-inventory` to identify its candidate hosts. Worker
+diagnostics identify the order namespace for CaaS and `hardware-inventory` for
+MaaS. Failure artifacts collect the order InfraEnv, Agents, ClusterOrder,
+worker BMIs and selected BMH statuses. The Netris workflow starts serial-console capture before
+ClusterOrder provisioning and stops it after deployment/tests. Its
 `caas/worker-diagnostics/` artifact directory contains those boot logs, a
-redacted snapshot of the ClusterOrder, worker BMIs and selected BMH statuses,
-and the AAP job IDs that link to stdout in the separate OSAC artifact.
+redacted snapshot of those resources, and the AAP job IDs that link to stdout
+in the separate OSAC artifact.
 
 ### Destroy
 
@@ -132,7 +148,7 @@ and the AAP job IDs that link to stdout in the separate OSAC artifact.
 | `make destroy-osac` | Tear down OSAC: helm releases, operators, CRDs, namespaces |
 | `make destroy-ocp` | Reset OCP for reinstall: delete cluster, recreate disk, boot VM |
 | `make destroy-infra` | Tear down netris-lab (VMs, K3s, topology) |
-| `make destroy-caas` | CaaS teardown: stop discovery VMs, remove disks/ISO, delete namespace, clean DNS |
+| `make destroy-caas` | CaaS/MaaS teardown: stop worker VMs, remove disks/ISO, let OSAC remove CaaS order resources, delete shared discovery resources in MaaS mode, clean DNS |
 | `make force-destroy-caas` | destroy-caas + strip stuck orders/namespaces, wipe VMs, Netris orphans |
 | `make destroy-maas` | destroy-caas with MaaS cluster/host-type overrides |
 | `make force-destroy-maas` | force-destroy-caas with MaaS overrides |
@@ -202,13 +218,13 @@ make connectivity   # re-runs VPN, socat, ISP FRR, softgate agents
 
 **Deploy CaaS after OSAC is up:**
 ```bash
-make setup-caas     # discover hosts, label Agents and BMHs, register worker inventory
+make setup-caas     # prelabel CaaS BMHs, register worker inventory
 make deploy-caas    # create cluster
 ```
 
 **Deploy MaaS after OSAC is up:**
 ```bash
-make setup-maas     # same discovery path; labels only MAAS_LABEL_HOSTNAMES (default h02+h03) with g5
+make setup-maas     # shared discovery path; labels only MAAS_LABEL_HOSTNAMES (default h02+h03) with g5
 make deploy-maas    # create cluster with ocp_4_20_ai_maas + enable_* params
 ```
 
@@ -358,10 +374,10 @@ make deploy-osac EXTRA_VARS='{"osac_branch": "feature-x"}'
 | `netris_username` | `netris` | Netris API username |
 | `netris_password` | *(required)* | Netris API password — set in your local config, validated at deploy time |
 | `ew_fabric_enable` | `0` | East-West fabric (0=NS only) |
-| `dns_server` | `8.8.8.8` | Upstream DNS server for the lab (override in environments where public DNS is blocked) |
+| `dns_server` | `10.11.5.160` | Default lab upstream resolver; override when running outside the lab |
 | `caas_cluster_template` | `osac.templates.ocp_ci_small` | Cluster template for CaaS cluster creation |
 | `caas_cluster_name` | `caas-ci-cluster` | CaaS cluster name |
-| `caas_host_type_id` | `ci-worker` | Resource class for discovery Agents; matching BMHs receive the BareMetalInstanceType selector labels |
+| `caas_host_type_id` | `ci-worker` | Resource-class name; selected BMHs receive this value in the BareMetalInstanceType selector label |
 | `caas_cluster_baremetal_instance_type` | `ci-worker` | Shared BareMetalInstanceType ensured by `setup-caas`; independent of the HostType/resource class |
 | `caas_cluster_baremetal_instance_type_host_labels` | `osac.openshift.io/resource_class: ci-worker` | Inventory host selector stored in the instance type and applied to selected BMHs; defaults to the configured resource class |
 | `caas_cluster_baremetal_instance_type_network_ports` | `eth9` fabric port | Hardware network ports stored in the instance type; defaults to the BM provisioning fabric port |
@@ -377,7 +393,10 @@ contains Linux interface names (for example, `ens6`). Keep the first fabric
 port aligned with `bmaas_provisioning_fabric_iface`. Existing types with
 different hardware or host selectors fail validation; choose a new type name
 when changing immutable hardware. Both the resource class and instance type
-are registered in `NETRIS_RESOURCE_CLASS_MAP` when missing.
+are registered in `NETRIS_RESOURCE_CLASS_MAP` when missing. `setup-caas` also
+adds `agent_server_name_patterns`, which maps order-bound Agent inventory
+hostnames to their Netris server names when the Agents do not already carry
+`netris.server/name` labels.
 
 ```bash
 make deploy-ocp EXTRA_VARS="ocp_version=4.18"
@@ -419,7 +438,7 @@ make setup-maas MAAS_DISCOVERY_MEMORY_MB=49152
 | `osac_external_ip_pool_cidr` | `198.51.100.24/29` | OSAC tenant ExternalIPPool CIDR; host routes/masquerades it toward the softgate. Must not overlap the mgmt nat/l4lb/bgp pools. OSAC creates the Netris allocation itself. | defaults only |
 | `netris_username` | `netris` | Netris API username | defaults only |
 | `netris_password` | *(required)* | Netris API password — no default, set in local config | yes |
-| `dns_server` | `8.8.8.8` | Upstream DNS server threaded through cloud-init, Netris topology, dnsmasq/DHCP, and the OCP NMState resolver. Override in environments where public DNS (8.8.8.8, 1.1.1.1) is unreachable | yes |
+| `dns_server` | `10.11.5.160` | Lab resolver threaded through cloud-init, Netris topology, dnsmasq/DHCP, and the OCP NMState resolver. Override when running outside the lab | yes |
 
 Set `dns_server` when the lab host cannot reach public DNS resolvers. Override per-run via `EXTRA_VARS`, or set it permanently in [`inventory/group_vars/all.yml`](inventory/group_vars/all.yml):
 
@@ -477,18 +496,20 @@ dns_server: "10.0.0.1"
 | `caas_cluster_release_image` | `quay.io/openshift-release-dev/ocp-release:4.22.0-multi` | OpenShift release payload for the CaaS ClusterVersion | defaults only |
 | `caas_cluster_disk_image_name` | `rhcos-4-22` | RHCOS DiskImage ensured by `setup-caas` | defaults only |
 | `caas_cluster_disk_image_source_ref` | `oci://quay.io/rh_ee_rpiccoli/rhcos-bmi:4.22.0` | RHCOS BMI image source | defaults only |
-| `caas_discovery_infraenv_namespace` | `hardware-inventory` | Shared InfraEnv namespace used to discover candidate VMs; ClusterOrders get separate InfraEnvs | defaults only |
+| `caas_use_order_infraenv_for_worker_boot` | `true` | CaaS skips the shared discovery ISO and waits for OSAC's ClusterOrder InfraEnv; `setup-maas` sets this to `false` | defaults only |
+| `caas_discovery_infraenv_namespace` | `hardware-inventory` | Shared discovery namespace used by the legacy MaaS setup | defaults only |
+| `caas_agent_namespace` | workload tenant for direct CaaS; `hardware-inventory` for MaaS | Namespace used for Agent diagnostics and legacy discovery cleanup | defaults only |
 | `bmaas_bmh_namespace` | `host-inventory` | Namespace containing the Metal3 BareMetalHosts selected by BMF | defaults only |
-| `caas_host_type_id` | `ci-worker` | Resource class label for discovery Agents; matching BMHs receive the BareMetalInstanceType selector labels | defaults only |
+| `caas_host_type_id` | `ci-worker` | Resource-class name applied to selected BMHs for the BareMetalInstanceType selector | defaults only |
 | `caas_cluster_baremetal_instance_type` | `ci-worker` | Shared BareMetalInstanceType ensured by `setup-caas`; independent of the HostType/resource class | defaults only |
 | `caas_cluster_baremetal_instance_type_host_labels` | `osac.openshift.io/resource_class: ci-worker` | Inventory host selector stored on the instance type and applied to selected BMHs | defaults only |
 | `caas_cluster_baremetal_instance_type_network_ports` | `eth9` fabric port | Netris hardware ports for the worker instance type | defaults only |
-| `caas_discovery_vcpu` | `4` | Discovery VM vCPUs | yes (8) |
+| `caas_discovery_vcpu` | `4` | CaaS worker VM vCPUs; also used by legacy MaaS discovery | yes (8) |
 | `caas_discovery_vcpu_overrides` | `{}` | Per-VM vCPU map (VM name → count); empty = use `caas_discovery_vcpu` | defaults only |
-| `caas_discovery_memory_mb` | `16384` | Discovery VM memory in MB | yes (32768) |
+| `caas_discovery_memory_mb` | `16384` | CaaS worker VM memory in MB; also used by legacy MaaS discovery | yes (32768) |
 | `caas_discovery_memory_mb_overrides` | `{}` | Per-VM memory map (VM name → MB); empty = use `caas_discovery_memory_mb` | defaults only |
-| `caas_discovery_disk_gb` | `100` | Discovery VM disk in GB | yes (150) |
-| `caas_discovery_vm_patterns` | `[hgx-pod00-su0-h01..03]` | VM names for CaaS discovery | defaults only |
+| `caas_discovery_disk_gb` | `100` | CaaS worker VM disk in GB | yes (150) |
+| `caas_discovery_vm_patterns` | `[hgx-pod00-su0-h01..03]` | VM names for CaaS workers and the legacy MaaS discovery flow | defaults only |
 
 `deploy-caas` creates the Fulfillment tenant if absent and waits up to roughly
 10 minutes for tenant synchronization and default networking readiness before
@@ -507,7 +528,7 @@ Cluster lookup and the API delete in `destroy-caas` match both
 `caas_cluster_name` and `caas_cluster_tenant`. Pass the same tenant override to
 deployment and teardown. A same-name cluster in another tenant, including one
 left in `shared` by an earlier run, is not reused or deleted by this lookup.
-The discovery-agent/VM cleanup and `force-destroy-caas` still operate on the
+The worker VM/InfraEnv cleanup and `force-destroy-caas` still operate on the
 configured lab resources; they are not general tenant-scoped cleanup tools.
 
 ## Testing OSAC Components

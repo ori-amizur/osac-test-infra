@@ -17,11 +17,11 @@ roles/                          # Ansible roles (each has tasks/main.yml)
   prep-osac/                    # Clone mono-repo, patch Helm values (fresh install)
   prep-refresh-osac/            # Clone mono-repo, patch values, rebuild CLI (snapshot refresh)
   patch-osac-refresh/           # Post-refresh: Netris/SSH + AAP project pin sync + CaC
-  discover-caas/                # Boot discovery VMs with InfraEnv ISO
-  setup-caas/                   # Label agents, register host type
+  discover-caas/                # Configure Assisted networking; optional shared discovery boot
+  setup-caas/                   # Select BMHs, prepare workers and register catalog/Netris mappings
   create-caas/                  # Create CaaS/MaaS cluster via fulfillment API
   destroy-infra/                # Teardown netris-lab
-  destroy-caas/                 # Teardown CaaS/MaaS (osac delete + agents/InfraEnv/VMs)
+  destroy-caas/                 # Teardown CaaS/MaaS (OSAC order cleanup, legacy discovery, VMs)
   force-destroy-caas/           # Force-clean stuck orders/namespaces + Netris orphans
 playbooks/                      # Ansible playbooks (one per workflow phase)
 inventory/
@@ -41,9 +41,9 @@ make deploy-infra           # Deploy netris-lab
 make deploy-ocp             # Configure Netris networking + restore OCP SNO from snapshot
 make deploy-osac            # Deploy OSAC (fresh Helm install or snapshot refresh based on OSAC_DEPLOY_MODE)
 make connectivity           # Re-run lab connectivity (VPN, BGP, softgate agents)
-make setup-caas             # CaaS setup: discover hosts, label Agents and BMHs, register worker inventory
+make setup-caas             # CaaS setup: prelabel BMHs; workers boot later with the ClusterOrder InfraEnv
 make deploy-caas            # CaaS: create cluster
-make setup-maas             # MaaS setup (wrappers over setup-caas with MaaS overrides)
+make setup-maas             # MaaS setup (wrappers over setup-caas with shared-discovery overrides)
 make deploy-maas            # MaaS: create cluster (ocp_4_20_ai_maas + -p params)
 make destroy-full           # Teardown all infrastructure
 make destroy-osac           # Teardown OSAC only
@@ -96,7 +96,7 @@ All variables in `inventory/group_vars/all.yml`. Key sections:
 - **OSAC**: `osac_repo/branch`, `osac_namespace`, `osac_values_file`
 - **Component images**: `osac_operator_image`, `fulfillment_service_image` (empty = defaults)
 - **Snapshot**: `snapshot_flavor_image`, `snapshot_flavor_dir`, `snapshot_recert_image`, `snapshot_osac_namespace`, `snapshot_osac_values_file`
-- **CaaS / MaaS**: `caas_discovery_vm_patterns`, `caas_host_type_id`, `caas_cluster_name`, `caas_agents`, `caas_resource_class_hostnames` (empty = all discovery Agents and matching BMHs); per-VM sizing via `caas_discovery_vcpu_overrides` / `caas_discovery_memory_mb_overrides`; MaaS Makefile `MAAS_*` (incl. `MAAS_DISCOVERY_MEMORY_MB_OVERRIDES`, default h01→16GiB)
+- **CaaS / MaaS**: `caas_use_order_infraenv_for_worker_boot` (true for CaaS, false for MaaS), `caas_discovery_vm_patterns`, `caas_host_type_id`, `caas_cluster_name`, `caas_agents`, `caas_resource_class_hostnames` (empty = all configured workers); per-VM sizing via `caas_discovery_vcpu_overrides` / `caas_discovery_memory_mb_overrides`; MaaS Makefile `MAAS_*` (incl. `MAAS_DISCOVERY_MEMORY_MB_OVERRIDES`, default h01→16GiB)
 
 ## External Dependencies
 

@@ -35,22 +35,22 @@ resource "netris_subnet" "l4lb-pool" {
 }
 
 data "netris_network_interface" "sg0" {
-  name                            = "swp51s0@ns-leaf-0"
+  name                            = "swp61@ns-leaf-0"
   depends_on                      = [netris_switch.north-south-leaf]
 }
 
 data "netris_network_interface" "sg1" {
-  name                            = "swp51s1@ns-leaf-0"
+  name                            = "swp62@ns-leaf-0"
   depends_on                      = [netris_switch.north-south-leaf]
 }
 
 data "netris_network_interface" "sg2" {
-  name                            = "swp51s2@ns-leaf-0"
+  name                            = "swp63@ns-leaf-0"
   depends_on                      = [netris_switch.north-south-leaf]
 }
 
 data "netris_network_interface" "sg3" {
-  name                            = "swp51s3@ns-leaf-0"
+  name                            = "swp64@ns-leaf-0"
   depends_on                      = [netris_switch.north-south-leaf]
 }
 

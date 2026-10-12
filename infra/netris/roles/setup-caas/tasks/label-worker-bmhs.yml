@@ -12,7 +12,7 @@
       caas_resource_class_hostnames, the selector must include
       osac.openshift.io/resource_class so excluded hosts cannot be allocated.
 
-- name: Resolve selected discovery agents to their BMaaS BareMetalHosts
+- name: Resolve selected CaaS hosts to their BMaaS BareMetalHosts
   ansible.builtin.shell: |
     python3 <<'PY'
     import json
@@ -25,13 +25,13 @@
         except (KeyError, json.JSONDecodeError) as exc:
             raise SystemExit(f"invalid {name}: {exc}") from exc
 
-    agent_hostnames = read_json("CAAS_AGENT_HOSTNAMES_JSON")
-    selected_agents = read_json("CAAS_SELECTED_AGENTS_JSON")
+    hostnames_by_id = read_json("CAAS_HOSTNAMES_JSON")
+    selected_hosts = read_json("CAAS_SELECTED_HOSTS_JSON")
     caas_agents = read_json("CAAS_AGENT_MAPPINGS_JSON")
     discovery_vms = read_json("CAAS_DISCOVERY_VMS_JSON")
 
     if len(discovery_vms) != len(set(discovery_vms)):
-        raise SystemExit(f"duplicate discovery VM names: {discovery_vms}")
+        raise SystemExit(f"duplicate worker VM names: {discovery_vms}")
 
     compiled = []
     for entry in caas_agents:
@@ -44,20 +44,18 @@
     for vm in discovery_vms:
         matches = [entry for entry, pattern in compiled if pattern.search(vm)]
         if len(matches) != 1:
-            raise SystemExit(
-                f"discovery VM {vm!r} matched {len(matches)} caas_agents entries; expected exactly one"
-            )
+            raise SystemExit(f"worker VM {vm!r} matched {len(matches)} caas_agents entries; expected one")
     selected_bmhs = []
-    agent_to_bmh = {}
-    for agent_name in selected_agents:
-        hostname = agent_hostnames.get(agent_name)
+    host_to_bmh = {}
+    for host_id in selected_hosts:
+        hostname = hostnames_by_id.get(host_id)
         if not hostname:
-            raise SystemExit(f"selected discovery Agent {agent_name!r} has no inventory hostname")
+            raise SystemExit(f"selected CaaS host {host_id!r} has no hostname mapping")
 
         matches = [entry for entry, pattern in compiled if pattern.search(hostname)]
         if len(matches) != 1:
             raise SystemExit(
-                f"Agent {agent_name!r} hostname {hostname!r} matched {len(matches)} caas_agents entries; "
+                f"CaaS host {host_id!r} hostname {hostname!r} matched {len(matches)} caas_agents entries; "
                 "expected exactly one"
             )
 
@@ -66,25 +64,25 @@
         bmh_matches = [vm for vm in discovery_vms if pattern.search(vm)]
         if len(bmh_matches) != 1:
             raise SystemExit(
-                f"Agent {agent_name!r} hostname {hostname!r} maps to {len(bmh_matches)} discovery VMs; "
+                f"CaaS host {host_id!r} hostname {hostname!r} maps to {len(bmh_matches)} worker VMs; "
                 "expected exactly one"
             )
 
         bmh_name = bmh_matches[0]
         if bmh_name in selected_bmhs:
-            raise SystemExit(f"multiple selected Agents map to BareMetalHost {bmh_name!r}")
+            raise SystemExit(f"multiple selected CaaS hosts map to BareMetalHost {bmh_name!r}")
         selected_bmhs.append(bmh_name)
-        agent_to_bmh[agent_name] = bmh_name
+        host_to_bmh[host_id] = bmh_name
 
     print(json.dumps({
         "selected_bmhs": selected_bmhs,
         "unselected_bmhs": [vm for vm in discovery_vms if vm not in selected_bmhs],
-        "agent_to_bmh": agent_to_bmh,
+        "host_to_bmh": host_to_bmh,
     }))
     PY
   environment:
-    CAAS_AGENT_HOSTNAMES_JSON: "{{ _agent_hostname_map | to_json }}"
-    CAAS_SELECTED_AGENTS_JSON: "{{ _agents_for_resource_class | to_json }}"
+    CAAS_HOSTNAMES_JSON: "{{ _agent_hostname_map | to_json }}"
+    CAAS_SELECTED_HOSTS_JSON: "{{ _agents_for_resource_class | to_json }}"
     CAAS_AGENT_MAPPINGS_JSON: "{{ caas_agents | to_json }}"
     CAAS_DISCOVERY_VMS_JSON: "{{ caas_discovery_vms | to_json }}"
   register: _caas_bmh_label_plan_raw
@@ -102,7 +100,7 @@
       selector={{ caas_cluster_baremetal_instance_type_host_labels }} on
       {{ _caas_bmhs_for_resource_class | length }}/{{ caas_discovery_vms | length }}
       BareMetalHosts in {{ bmaas_bmh_namespace }};
-      Agent-to-BMH map={{ _caas_bmh_label_plan.agent_to_bmh }}
+      host-to-BMH map={{ _caas_bmh_label_plan.host_to_bmh }}
 
 - name: Read BMaaS BareMetalHost inventory before labeling
   ansible.builtin.command:
@@ -131,12 +129,12 @@
       {{ (_caas_bmh_inventory_before.stdout | from_json).get('items', [])
          | map(attribute='metadata.name') | list }}
 
-- name: Require every selected discovery VM to have a BMaaS BareMetalHost
+- name: Require every selected worker VM to have a BMaaS BareMetalHost
   ansible.builtin.assert:
     that:
       - _caas_bmhs_for_resource_class | difference(_caas_bmh_names_before) | length == 0
     fail_msg: >-
-      No BareMetalHost exists in {{ bmaas_bmh_namespace }} for selected discovery
+      No BareMetalHost exists in {{ bmaas_bmh_namespace }} for selected worker
       VMs {{ _caas_bmhs_for_resource_class | difference(_caas_bmh_names_before) }}.
 
 - name: Label selected BMHs with the CaaS worker selector

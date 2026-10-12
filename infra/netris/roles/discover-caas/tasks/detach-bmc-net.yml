@@ -1,0 +1,20 @@
+---
+# bmc-net is an Ironic lifecycle NIC and is not part of the installed worker's
+# Assisted Service network path. Its isolated DHCP server advertises a default
+# route that competes with the management network and has no route to ingress.
+- name: Detach the BMaaS lifecycle NIC so it cannot hijack the worker default route
+  ansible.builtin.shell:
+    cmd: |
+      set +e
+      VM="{{ item }}"
+      MAC=$(virsh domiflist "$VM" | awk -v n="{{ bmc_net_name }}" '$3 == n {print $5; exit}')
+      if [ -n "$MAC" ]; then
+        virsh detach-interface "$VM" network --mac "$MAC" --config && echo "detached {{ bmc_net_name }} ($MAC) from $VM"
+      else
+        echo "no {{ bmc_net_name }} NIC on $VM; nothing to detach"
+      fi
+    executable: /bin/bash
+  loop: "{{ caas_discovery_vms }}"
+  when: bare_metal_services | default(false) | bool
+  register: _detach_bmc_net
+  changed_when: "'detached' in _detach_bmc_net.stdout | default('')"

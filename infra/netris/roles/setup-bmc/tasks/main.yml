@@ -89,6 +89,14 @@
     state: directory
     mode: "0755"
 
+- name: Create sushy-tools persistent state directory
+  ansible.builtin.file:
+    path: "{{ sushy_tools_state_dir | default('/var/lib/sushy-tools') }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
 - name: Write sushy-tools config
   ansible.builtin.copy:
     content: |
@@ -96,6 +104,7 @@
       SUSHY_EMULATOR_LISTEN_PORT = {{ sushy_tools_port }}
       SUSHY_EMULATOR_SSL_CERT = None
       SUSHY_EMULATOR_SSL_KEY = None
+      SUSHY_EMULATOR_STATE_DIR = "{{ sushy_tools_state_dir | default('/var/lib/sushy-tools') }}"
       SUSHY_EMULATOR_LIBVIRT_URI = "qemu:///system"
       SUSHY_EMULATOR_IGNORE_BOOT_DEVICE = False
       SUSHY_EMULATOR_STORAGE_POOL = "{{ sushy_tools_storage_pool }}"
@@ -113,14 +122,21 @@
 
 - name: Check if sushy-emulator is already running
   ansible.builtin.shell:
-    cmd: pgrep -f sushy-emulator
+    cmd: >-
+      pgrep -f '[/]sushy-emulator --config
+      {{ sushy_tools_config_dir }}/sushy-emulator.conf'
   register: _sushy_running
   failed_when: false
   changed_when: false
 
 - name: Stop existing sushy-emulator if config changed
   ansible.builtin.shell:
-    cmd: pkill -f sushy-emulator || true
+    cmd: >-
+      pkill -f '[/]sushy-emulator --config
+      {{ sushy_tools_config_dir }}/sushy-emulator.conf'
+  register: _sushy_stop
+  failed_when: _sushy_stop.rc not in [0, 1]
+  changed_when: _sushy_stop.rc == 0
   when: _sushy_config is changed and _sushy_running.rc == 0
 
 - name: Start sushy-emulator

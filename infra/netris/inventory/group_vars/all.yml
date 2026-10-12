@@ -1,7 +1,9 @@
 # Netris Lab
 netris_lab_dir: "{{ inventory_dir }}/../netris-lab"
 ew_fabric_enable: 0
-dns_server: "8.8.8.8"
+# Internal resolver reachable from the isolated OCP VNet; guest DNS queries to
+# public 8.8.8.8 are blocked in this lab.
+dns_server: "10.11.5.160"
 
 # Netris Controller (URL is discovered dynamically by configure-netris role)
 netris_username: "netris"
@@ -118,24 +120,26 @@ caas_cluster_release_image: "quay.io/openshift-release-dev/ocp-release:{{ caas_c
 caas_cluster_disk_image_name: "rhcos-{{ ocp_version | replace('.', '-') }}"
 caas_cluster_disk_image_source_ref: "oci://quay.io/rh_ee_rpiccoli/rhcos-bmi:{{ caas_cluster_release_version }}"
 
-# CaaS Discovery (boot remaining servers with discovery ISO)
+# CaaS worker VM names and sizing. The direct CaaS path prepares these VMs but
+# leaves them powered off until OSAC provisions their BareMetalInstances with
+# the ClusterOrder InfraEnv. The legacy MaaS path still boots the shared ISO.
 caas_discovery_vm_patterns:
   - "hgx-pod00-su0-h01"
   - "hgx-pod00-su0-h02"
   - "hgx-pod00-su0-h03"
 caas_discovery_vcpu: 4
-# Optional per-VM vCPU overrides (VM name → count). Empty = use caas_discovery_vcpu for all.
+# Optional per-VM vCPU overrides (VM name → count). Empty = use the default for all.
 caas_discovery_vcpu_overrides: {}
 caas_discovery_memory_mb: 16384
-# Optional per-VM memory overrides (VM name → MB). Empty = use caas_discovery_memory_mb for all.
+# Optional per-VM memory overrides (VM name → MB). Empty = use the default for all.
 caas_discovery_memory_mb_overrides: {}
 caas_discovery_disk_gb: 100
 caas_discovery_infraenv_name: "infraenv"
 caas_discovery_infraenv_namespace: "hardware-inventory"
+caas_use_order_infraenv_for_worker_boot: true
 
-# Per-VM discovery experiments — apply a different config to each discovery VM
-# in a single run, then read the per-VM diagnostics to see which config lets the
-# agent register. Lets one ~1.5h run A/B/C-test several hypotheses at once.
+# Legacy shared-InfraEnv discovery experiments — apply a different config to
+# each discovery VM in a single run, then inspect the per-VM diagnostics.
 # Supported keys per VM:
 #   detach_networks: [<libvirt network>, ...]  # detach these NICs before boot
 #   boot_order: "<dev,dev>"                     # virt-xml --boot (default hd,cdrom)
@@ -148,8 +152,9 @@ caas_discovery_infraenv_namespace: "hardware-inventory"
 # forwarding the agents to the OCP ingress -- now fixed in discover-caas.)
 caas_discovery_vm_overrides: {}
 
-# CaaS Setup (host type, discovery Agent/BMH labels, cluster creation)
-caas_agent_namespace: "{{ caas_discovery_infraenv_namespace }}"
+# CaaS Agents register through the ClusterOrder InfraEnv in the workload
+# tenant. MaaS retains shared-InfraEnv discovery in hardware-inventory.
+caas_agent_namespace: "{{ caas_cluster_tenant if (caas_use_order_infraenv_for_worker_boot | default(true) | bool) else caas_discovery_infraenv_namespace }}"
 caas_server_cluster_template_name: "ns-only"
 caas_server_cluster_template_gateway: "192.168.101.1/24"
 caas_host_type_id: "ci-worker"
@@ -191,12 +196,14 @@ caas_cluster_baremetal_instance_type_network_ports:
 # When non-empty, osac create uses --pull-secret-file / --ssh-public-key-file and
 # -p for each entry instead of the default CaaS credential arguments (MaaS templates).
 caas_cluster_params: []
-# Empty = label/approve every discovered agent and label every matching BMH.
-# Non-empty = only these inventory hostnames get osac.openshift.io/resource_class
-# on both the Agent and BMH (other Agents/BMHs are unlabeled). setup-maas defaults
-# to h02+h03 so MaaS claims those workers.
+# Empty = use every configured CaaS worker VM/BMH. Non-empty = only matching
+# configured hostnames receive the resource-class label on BMHs. The legacy
+# MaaS setup still applies this filter to its discovery Agents as well.
 caas_resource_class_hostnames: []
 caas_agents:
+  # vm_pattern matches the libvirt VM/BMH name and the resulting Agent hostname.
+  # setup-caas uses the same map for static BMH selection and for AAP's
+  # order-bound Agent-to-Netris server-name patterns.
   - vm_pattern: "hgx-pod00-su0-h01"
     netris_server_name: "hgx-pod00-su0-h01"
   - vm_pattern: "hgx-pod00-su0-h02"
@@ -207,7 +214,7 @@ caas_agents:
 # ── Bare metal services ──────────────────────────────────────────────
 # Enables BMC network, sushy-tools, and BMF operator secrets.
 # Required for both BMaaS and CaaS on bare metal.
-bare_metal_services: false
+bare_metal_services: true
 
 # ── BMC network (shared infrastructure) ──────────────────────────────
 # Dedicated libvirt network for Ironic ↔ sushy-tools communication.

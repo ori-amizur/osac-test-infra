@@ -63,7 +63,7 @@ resource "netris_inventory_profile" "inv-profile-north-south" {
   dnsservers                      = [
                                       "{{ dns_server }}"
   ]
-{% if netris_provider_aaa_supported | bool %}
+{% if netris_provider_aaa_supported | default(false) | bool %}
   aaa {
     authorder = ["local"]
     local {
@@ -113,7 +113,7 @@ resource "netris_switch" "north-south-leaf" {
   mainip                          = cidrhost(var.north-south-fabric.lo-subnet, count.index + 1)
   mgmtip                          = cidrhost(var.north-south-fabric.mgmt-subnet, count.index + 1)
   portcount                       = var.north-south-fabric.leaf-port-count
-  breakout                        = "${var.north-south-fabric.leaf-port-breakout}x200"
+  breakout                        = var.north-south-fabric.leaf-port-breakout > 1 ? "${var.north-south-fabric.leaf-port-breakout}x200" : "off"
   depends_on                      = [
                                       netris_subnet.lo-north-south,
                                       netris_subnet.mgmt-north-south
@@ -152,7 +152,7 @@ resource "netris_switch" "north-south-spine" {
   mainip                          = cidrhost(var.north-south-fabric.lo-subnet, count.index + 513)
   mgmtip                          = cidrhost(var.north-south-fabric.mgmt-subnet, count.index + 513)
   portcount                       = var.north-south-fabric.spine-port-count
-  breakout                        = "${var.north-south-fabric.spine-port-breakout}x200"
+  breakout                        = var.north-south-fabric.spine-port-breakout > 1 ? "${var.north-south-fabric.spine-port-breakout}x200" : "off"
   depends_on                      = [
                                       netris_subnet.lo-north-south,
                                       netris_subnet.mgmt-north-south
@@ -183,7 +183,7 @@ resource "netris_softgate" "north-south-softgate" {
 resource "netris_link" "north-south-leaf-to-gpu-server" {
   count                           = (var.north-south-fabric.enable * var.gpu-server-count * 2)
   ports                           = [
-                                      "swp${ (  floor ( (floor(count.index/2) -  ( (var.gpu-server-count/var.north-south-fabric.leaf-count*2) * floor(count.index/(var.gpu-server-count/var.north-south-fabric.leaf-count*4)))) / var.north-south-fabric.leaf-port-breakout )+1  )}s${(floor(count.index/2) - ((var.gpu-server-count/var.north-south-fabric.leaf-count*2) * floor(count.index/(var.gpu-server-count/var.north-south-fabric.leaf-count*4)))) - var.north-south-fabric.leaf-port-breakout*floor((floor(count.index/2) - ((var.gpu-server-count/var.north-south-fabric.leaf-count*2) * floor(count.index/(var.gpu-server-count/var.north-south-fabric.leaf-count*4))))/var.north-south-fabric.leaf-port-breakout) }@${netris_switch.north-south-leaf[(count.index - (2*floor(count.index/2)) + (2*(floor(count.index/(var.gpu-server-count/var.north-south-fabric.leaf-count*4) )) ) )].name}",
+                                      "swp${ (  floor ( (floor(count.index/2) -  ( (var.gpu-server-count/var.north-south-fabric.leaf-count*2) * floor(count.index/(var.gpu-server-count/var.north-south-fabric.leaf-count*4)))) / var.north-south-fabric.leaf-port-breakout )+1  )}@${netris_switch.north-south-leaf[(count.index - (2*floor(count.index/2)) + (2*(floor(count.index/(var.gpu-server-count/var.north-south-fabric.leaf-count*4) )) ) )].name}",
                                       "eth${(count.index - (2*floor(count.index/2)) + local.gpu-server-first-ns-port)}@${netris_server.hgx[(floor(count.index/2))].name}"
   ]
   ipv4                            = [
@@ -202,8 +202,8 @@ resource "netris_link" "north-south-leaf-to-gpu-server" {
 resource "netris_link" "north-south-leaf-to-spine" {
   count                           = (var.north-south-fabric.enable * var.north-south-fabric.leaf-count * var.north-south-fabric.spine-count * var.north-south-fabric.leaf-to-spine-link-count)
   ports                           = [
-                                      "swp${(floor((count.index - (var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count) * floor(count.index/(var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count)))/var.north-south-fabric.spine-port-breakout)+1)}s${((count.index - (var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count) * floor(count.index/(var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count))) - (var.north-south-fabric.spine-port-breakout*floor((count.index - (var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count) * floor(count.index/(var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count)))/var.north-south-fabric.spine-port-breakout)))}@${netris_switch.north-south-spine[floor(count.index/(var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count))].name}",
-                                      "swp${(floor((var.north-south-fabric.leaf-to-spine-start-port + (count.index -  (var.north-south-fabric.leaf-to-spine-link-count*floor(count.index/var.north-south-fabric.leaf-to-spine-link-count)) + (var.north-south-fabric.leaf-to-spine-link-count*floor(count.index/(var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count))) ) )/var.north-south-fabric.leaf-port-breakout)+1)}s${((var.north-south-fabric.leaf-to-spine-start-port + (count.index -  (var.north-south-fabric.leaf-to-spine-link-count*floor(count.index/var.north-south-fabric.leaf-to-spine-link-count)) + (var.north-south-fabric.leaf-to-spine-link-count*floor(count.index/(var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count))) ) )-(var.north-south-fabric.leaf-port-breakout*floor((var.north-south-fabric.leaf-to-spine-start-port + (count.index -  (var.north-south-fabric.leaf-to-spine-link-count*floor(count.index/var.north-south-fabric.leaf-to-spine-link-count)) + (var.north-south-fabric.leaf-to-spine-link-count*floor(count.index/(var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count))) ) )/var.north-south-fabric.leaf-port-breakout)))}@${netris_switch.north-south-leaf[( floor(count.index/var.north-south-fabric.leaf-to-spine-link-count) - (var.north-south-fabric.leaf-count*floor(count.index/(var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count))) )].name}"
+                                      "swp${(floor((count.index - (var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count) * floor(count.index/(var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count)))/var.north-south-fabric.spine-port-breakout)+1)}@${netris_switch.north-south-spine[floor(count.index/(var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count))].name}",
+                                      "swp${(floor((var.north-south-fabric.leaf-to-spine-start-port + (count.index -  (var.north-south-fabric.leaf-to-spine-link-count*floor(count.index/var.north-south-fabric.leaf-to-spine-link-count)) + (var.north-south-fabric.leaf-to-spine-link-count*floor(count.index/(var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count))) ) )/var.north-south-fabric.leaf-port-breakout)+1)}@${netris_switch.north-south-leaf[( floor(count.index/var.north-south-fabric.leaf-to-spine-link-count) - (var.north-south-fabric.leaf-count*floor(count.index/(var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count))) )].name}"
   ]
   ipv4                            = [
                                       "169.254.${floor(count.index/(var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count))}.${ (2*(count.index - (var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count) * floor(count.index/(var.north-south-fabric.leaf-count * var.north-south-fabric.leaf-to-spine-link-count))  )) }/31",
@@ -240,7 +240,7 @@ resource "netris_link" "north-south-oob-leaf-to-server" {
 resource "netris_link" "north-south-oob-leaf-to-spine" {
   count                           = (var.north-south-fabric.enable * var.north-south-fabric.oob-leaf-count * var.north-south-fabric.spine-count)
   ports                           = [
-                                      "swp${(floor(((var.north-south-fabric.leaf-to-spine-link-count*var.north-south-fabric.leaf-count) + count.index - (var.north-south-fabric.oob-leaf-count * var.north-south-fabric.oob-uplink-into-spine) * floor(count.index/(var.north-south-fabric.oob-leaf-count * var.north-south-fabric.oob-uplink-into-spine)))/(var.north-south-fabric.spine-port-breakout))+1)}s${(((var.north-south-fabric.leaf-to-spine-link-count*var.north-south-fabric.leaf-count) + count.index - (var.north-south-fabric.oob-leaf-count * var.north-south-fabric.oob-uplink-into-spine) * floor(count.index/(var.north-south-fabric.oob-leaf-count * var.north-south-fabric.oob-uplink-into-spine)))-(var.north-south-fabric.spine-port-breakout)*floor(((var.north-south-fabric.leaf-to-spine-link-count*var.north-south-fabric.leaf-count) + count.index - (var.north-south-fabric.oob-leaf-count * var.north-south-fabric.oob-uplink-into-spine) * floor(count.index/(var.north-south-fabric.oob-leaf-count * var.north-south-fabric.oob-uplink-into-spine)))/(var.north-south-fabric.spine-port-breakout)))}@${netris_switch.north-south-spine[floor(count.index/(var.north-south-fabric.oob-leaf-count * var.north-south-fabric.oob-uplink-into-spine))].name}",
+                                      "swp${(floor(((var.north-south-fabric.leaf-to-spine-link-count*var.north-south-fabric.leaf-count) + count.index - (var.north-south-fabric.oob-leaf-count * var.north-south-fabric.oob-uplink-into-spine) * floor(count.index/(var.north-south-fabric.oob-leaf-count * var.north-south-fabric.oob-uplink-into-spine)))/(var.north-south-fabric.spine-port-breakout))+1)}@${netris_switch.north-south-spine[floor(count.index/(var.north-south-fabric.oob-leaf-count * var.north-south-fabric.oob-uplink-into-spine))].name}",
                                       "swp${(51 + (count.index -  (var.north-south-fabric.oob-uplink-into-spine*floor(count.index/var.north-south-fabric.oob-uplink-into-spine)) + (var.north-south-fabric.oob-uplink-into-spine*floor(count.index/(var.north-south-fabric.oob-leaf-count * var.north-south-fabric.oob-uplink-into-spine))) ) )}@${netris_switch.north-south-oob-leaf[( floor(count.index/var.north-south-fabric.oob-uplink-into-spine) - (var.north-south-fabric.oob-leaf-count*floor(count.index/(var.north-south-fabric.oob-leaf-count * var.north-south-fabric.oob-uplink-into-spine))) )].name}"
   ]
   ipv4                            = [
@@ -257,7 +257,7 @@ resource "netris_link" "softgates-eth1" {
   count                           = (var.north-south-fabric.enable * var.north-south-fabric.softgate-count)
   ports                           = [
                                       "eth1@${netris_softgate.north-south-softgate[count.index].name}",
-                                      "swp${ floor((var.north-south-fabric.leaf-to-softgate-start-port+count.index)/var.north-south-fabric.leaf-port-breakout)+1 }s${((var.north-south-fabric.leaf-to-softgate-start-port+count.index) - (var.north-south-fabric.leaf-port-breakout*floor((var.north-south-fabric.leaf-to-softgate-start-port+count.index)/var.north-south-fabric.leaf-port-breakout)))}@${netris_switch.north-south-leaf[var.north-south-fabric.softgate-leaf-list[0]].name}"
+                                      "swp${ floor((var.north-south-fabric.leaf-to-softgate-start-port+count.index)/var.north-south-fabric.leaf-port-breakout)+1 }@${netris_switch.north-south-leaf[var.north-south-fabric.softgate-leaf-list[0]].name}"
   ]
   ipv4                            = [
                                       "169.254.${(count.index+128)}.${(1+(2*count.index))}/31",
@@ -273,7 +273,7 @@ resource "netris_link" "softgates-eth2" {
   count                           = (var.north-south-fabric.enable * var.north-south-fabric.softgate-count)
   ports                           = [
                                       "eth2@${netris_softgate.north-south-softgate[count.index].name}",
-                                      "swp${ floor((var.north-south-fabric.leaf-to-softgate-start-port+count.index)/var.north-south-fabric.leaf-port-breakout)+1 }s${((var.north-south-fabric.leaf-to-softgate-start-port+count.index) - (var.north-south-fabric.leaf-port-breakout*floor((var.north-south-fabric.leaf-to-softgate-start-port+count.index)/var.north-south-fabric.leaf-port-breakout)))}@${netris_switch.north-south-leaf[var.north-south-fabric.softgate-leaf-list[1]].name}"
+                                      "swp${ floor((var.north-south-fabric.leaf-to-softgate-start-port+count.index)/var.north-south-fabric.leaf-port-breakout)+1 }@${netris_switch.north-south-leaf[var.north-south-fabric.softgate-leaf-list[1]].name}"
   ]
   ipv4                            = [
                                       "169.254.${(count.index+129)}.${(1+(2*count.index))}/31",

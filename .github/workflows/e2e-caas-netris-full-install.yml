@@ -665,8 +665,8 @@ jobs:
           make deploy-osac INFRA=netris SUITE=caas EXTRA_VARS="${MERGED}"
 
       # CaaS uses the BMaaS BMH pool. Create those hosts after OSAC is ready
-      # (BMaaS registers its catalog there) and before CaaS boots the same VMs
-      # for Assisted Service discovery and labels their corresponding BMHs.
+      # (BMaaS registers its catalog there) and before setup-caas prelabels the
+      # hosts. The workers stay off until OSAC provisions their order InfraEnv.
       - name: Setup BMaaS hosts for CaaS
         shell: bash
         timeout-minutes: 30
@@ -676,17 +676,16 @@ jobs:
 
       - name: Setup CaaS hosts and catalog
         shell: bash
-        # 45m (was 30m): discover-caas now captures each VM's early-boot console,
-        # and the agent-wait rescue runs discovery diagnostics; both need headroom
-        # under the step timeout so the diagnostics are not truncated.
+        # Includes CaaS worker preparation, catalog registration, and AAP
+        # template publishing. The shared discovery-ISO wait is skipped for CaaS.
         timeout-minutes: 45
         env:
           EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
         run: make setup-suite INFRA=netris SUITE=caas EXTRA_VARS="${EXTRA_VARS}"
 
-      # Keep a serial-console reader attached while the ClusterOrder/AAP flow
-      # reboots the selected BMaaS VMs. A post-failure virsh console cannot
-      # replay output emitted before the connection was opened.
+      # Arm serial-console readers while workers are still off. The diagnostic
+      # helper attaches as soon as ClusterOrder provisioning powers each VM on,
+      # preserving its first boot output for the order InfraEnv.
       - name: Start CaaS worker serial capture
         timeout-minutes: 3
         shell: bash

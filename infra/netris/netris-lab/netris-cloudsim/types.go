@@ -81,7 +81,7 @@ type NetrisInfo struct {
 	MGMTSubnets      []ipam.IPAM
 	ControllerInfo   NetrisControllerInfo
 	SiteObject       site.Site
-	allPortsBySwName map[string]map[string]interface{}
+	allPortsBySwName map[string]map[string]int
 }
 
 type NetrisControllerInfo struct {

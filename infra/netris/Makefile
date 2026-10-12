@@ -148,6 +148,7 @@ MAAS_PARAMS_JSON = $(shell python3 -c 'import json; print(json.dumps([p.strip() 
 MAAS_LABEL_HOSTNAMES_JSON = $(shell python3 -c 'import json; print(json.dumps([h.strip() for h in """$(MAAS_LABEL_HOSTNAMES)""".split(",") if h.strip()]))')
 
 MAAS_EXTRA = \
+  -e 'caas_use_order_infraenv_for_worker_boot=false' \
   -e 'caas_cluster_name=$(MAAS_CLUSTER_NAME)' \
   -e 'caas_host_type_id=$(MAAS_HOST_TYPE_ID)' \
   -e 'caas_cluster_node_set_size=2' \

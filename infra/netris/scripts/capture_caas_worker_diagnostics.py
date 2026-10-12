@@ -187,18 +187,18 @@ def start_serial_capture(output_dir: Path, patterns: list[str]) -> None:
                 except (OSError, ValueError):
                     existing_pid = -1
                 if existing_pid > 0 and process_matches(existing_pid, vm_name):
-                    captures.append({"vm": vm_name, "state": "already capturing", "pid": str(existing_pid)})
+                    captures.append({"vm": vm_name, "state": "already armed", "pid": str(existing_pid)})
                     continue
                 pid_file.unlink(missing_ok=True)
 
-            state = run_command(["virsh", "domstate", vm_name])
-            if state is None or state.returncode != 0 or state.stdout.strip().lower() != "running":
-                state_text = state.stdout.strip() if state is not None else "virsh domstate failed"
-                captures.append({"vm": vm_name, "state": f"not started: {state_text or 'VM is not running'}"})
-                continue
-
+            initial_state = run_command(["virsh", "domstate", vm_name])
+            initially_running = (
+                initial_state is not None
+                and initial_state.returncode == 0
+                and initial_state.stdout.strip().lower() == "running"
+            )
             console_command = f"virsh console --safe {shlex.quote(vm_name)}"
-            argv = [
+            console_capture_argv = [
                 "timeout",
                 "--signal=INT",
                 "--kill-after=10s",
@@ -210,12 +210,26 @@ def start_serial_capture(output_dir: Path, patterns: list[str]) -> None:
                 console_command,
                 "/dev/null",
             ]
+            # CaaS workers are intentionally powered off until the ClusterOrder
+            # provisions their BMI. Keep a watcher attached now so it opens the
+            # console as soon as Metal3 powers the VM for the order InfraEnv.
+            watcher_command = (
+                "while true; do "
+                f"state=$(virsh domstate {shlex.quote(vm_name)} 2>/dev/null "
+                "| tr -d '\\r' | tr '[:upper:]' '[:lower:]' || true); "
+                "if [[ \"$state\" == running ]]; then "
+                f"echo 'VM {vm_name} is running; attaching serial console'; "
+                f"exec {shlex.join(console_capture_argv)}; "
+                "fi; sleep 0.2; done"
+            )
             try:
                 with log_file.open("wb") as log_stream:
-                    log_stream.write(f"Serial console capture started {utc_now()} for {vm_name}\n".encode())
+                    log_stream.write(
+                        f"Serial console watcher started {utc_now()} for {vm_name}\n".encode()
+                    )
                     log_stream.flush()
                     process = subprocess.Popen(
-                        argv,
+                        ["bash", "-c", watcher_command],
                         stdin=subprocess.DEVNULL,
                         stdout=log_stream,
                         stderr=subprocess.STDOUT,
@@ -230,7 +244,8 @@ def start_serial_capture(output_dir: Path, patterns: list[str]) -> None:
                     pid_file.unlink(missing_ok=True)
                     captures.append({"vm": vm_name, "state": f"console exited immediately ({return_code})"})
                 else:
-                    captures.append({"vm": vm_name, "state": "capturing", "pid": str(process.pid)})
+                    state = "attaching to running VM" if initially_running else "armed; waiting for VM power-on"
+                    captures.append({"vm": vm_name, "state": state, "pid": str(process.pid)})
             except OSError as exc:
                 captures.append({"vm": vm_name, "state": f"not started: {exc}"})
 
@@ -244,7 +259,8 @@ def start_serial_capture(output_dir: Path, patterns: list[str]) -> None:
             "errors": errors,
         },
     )
-    print(f"Serial capture targets={len(matched)} active={sum(item['state'] == 'capturing' for item in captures)}")
+    armed = sum("pid" in item for item in captures)
+    print(f"Serial capture targets={len(matched)} armed={armed}")
 
 
 def stop_serial_capture(output_dir: Path) -> list[dict[str, str]]:
@@ -407,7 +423,7 @@ def collect_job_ids(clusterorders: list[dict[str, Any]], bmis: list[dict[str, An
 
 
 def capture_kubernetes_snapshot(
-    output_dir: Path, namespace: str, discovery_namespace: str, bmh_namespace: str, patterns: list[str]
+    output_dir: Path, namespace: str, agent_namespace: str, bmh_namespace: str, patterns: list[str]
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     errors: list[str] = []
@@ -528,7 +544,9 @@ def capture_kubernetes_snapshot(
         {
             "capturedAt": utc_now(),
             "orderNamespace": namespace,
-            "discoveryNamespace": discovery_namespace,
+            "agentNamespace": agent_namespace,
+            # Retain the old key for readers of earlier diagnostic artifacts.
+            "discoveryNamespace": agent_namespace,
             "bmhNamespace": bmh_namespace,
             "clusterOrders": len(clusterorders),
             "bareMetalInstances": len(bmis),
@@ -549,7 +567,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("action", choices=("start", "collect"))
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--namespace", required=True)
-    parser.add_argument("--discovery-namespace", required=True)
+    parser.add_argument("--agent-namespace", "--discovery-namespace", dest="agent_namespace", required=True)
     parser.add_argument("--bmh-namespace", required=True)
     parser.add_argument("--vm-patterns-json", required=True)
     return parser.parse_args()
@@ -573,7 +591,7 @@ def main() -> int:
     stop_serial_capture(args.output_dir)
     console_dir = args.output_dir / "worker-consoles"
     trim_and_redact_serial_logs(console_dir)
-    capture_kubernetes_snapshot(args.output_dir, args.namespace, args.discovery_namespace, args.bmh_namespace, patterns)
+    capture_kubernetes_snapshot(args.output_dir, args.namespace, args.agent_namespace, args.bmh_namespace, patterns)
     print(f"Worker diagnostics saved under {args.output_dir}")
     return 0
 

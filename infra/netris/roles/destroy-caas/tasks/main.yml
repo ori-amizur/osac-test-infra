@@ -1,6 +1,6 @@
 ---
-# Delete the named CaaS/MaaS cluster via osac CLI, then tear down discovery
-# agents / InfraEnv / worker VM disks.
+# Delete the named CaaS/MaaS cluster via osac CLI, then tear down legacy shared
+# discovery resources where applicable and clean up the worker VM disks.
 #
 # Use the same saved tenant as deploy-caas; do not create a tenant during teardown.
 - name: Configure CaaS CLI with explicit workload tenant
@@ -36,66 +36,69 @@
     - _osac_delete is not skipped
     - _osac_delete.rc | default(0) != 0
 
-# Step 2: Force-delete agents by removing finalizers
-- name: Get agent names
-  ansible.builtin.shell:
-    cmd: oc get agent -n {{ caas_agent_namespace }} -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true
-  environment:
-    KUBECONFIG: /root/.kube/config
-  register: _agents
-  changed_when: false
-  failed_when: false
+# Steps 2–4 apply only to MaaS's manually-created shared discovery resources.
+# In CaaS, deleting the ClusterOrder lets OSAC clean up its order-scoped Agents
+# and InfraEnv. Never delete every Agent from the shared workload tenant here.
+- name: Clean up legacy shared discovery resources
+  when: not (caas_use_order_infraenv_for_worker_boot | default(true) | bool)
+  block:
+    - name: Get shared discovery Agent names
+      ansible.builtin.shell:
+        cmd: oc get agent -n {{ caas_agent_namespace }} -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true
+      environment:
+        KUBECONFIG: /root/.kube/config
+      register: _agents
+      changed_when: false
+      failed_when: false
 
-- name: Remove finalizers from agents
-  ansible.builtin.command:
-    cmd: >-
-      oc patch agent/{{ item }} -n {{ caas_agent_namespace }}
-      --type=merge -p '{"metadata":{"finalizers":null}}'
-  environment:
-    KUBECONFIG: /root/.kube/config
-  loop: "{{ _agents.stdout.split() }}"
-  when: _agents.stdout | length > 0
-  failed_when: false
-  changed_when: true
+    - name: Remove finalizers from shared discovery Agents
+      ansible.builtin.command:
+        cmd: >-
+          oc patch agent/{{ item }} -n {{ caas_agent_namespace }}
+          --type=merge -p '{"metadata":{"finalizers":null}}'
+      environment:
+        KUBECONFIG: /root/.kube/config
+      loop: "{{ _agents.stdout.split() }}"
+      when: _agents.stdout | length > 0
+      failed_when: false
+      changed_when: true
 
-- name: Delete agents
-  ansible.builtin.command:
-    cmd: oc delete agent --all -n {{ caas_agent_namespace }} --wait=false
-  environment:
-    KUBECONFIG: /root/.kube/config
-  failed_when: false
-  changed_when: true
+    - name: Delete shared discovery Agents
+      ansible.builtin.command:
+        cmd: oc delete agent --all -n {{ caas_agent_namespace }} --wait=false
+      environment:
+        KUBECONFIG: /root/.kube/config
+      failed_when: false
+      changed_when: true
 
-# Step 3: Force-delete InfraEnv
-- name: Remove finalizers from InfraEnv
-  ansible.builtin.command:
-    cmd: >-
-      oc patch infraenv/{{ caas_discovery_infraenv_name }} -n {{ caas_discovery_infraenv_namespace }}
-      --type=merge -p '{"metadata":{"finalizers":null}}'
-  environment:
-    KUBECONFIG: /root/.kube/config
-  failed_when: false
-  changed_when: true
+    - name: Remove finalizers from shared discovery InfraEnv
+      ansible.builtin.command:
+        cmd: >-
+          oc patch infraenv/{{ caas_discovery_infraenv_name }} -n {{ caas_discovery_infraenv_namespace }}
+          --type=merge -p '{"metadata":{"finalizers":null}}'
+      environment:
+        KUBECONFIG: /root/.kube/config
+      failed_when: false
+      changed_when: true
 
-- name: Delete InfraEnv
-  ansible.builtin.command:
-    cmd: oc delete infraenv {{ caas_discovery_infraenv_name }} -n {{ caas_discovery_infraenv_namespace }} --wait=false
-  environment:
-    KUBECONFIG: /root/.kube/config
-  failed_when: false
-  changed_when: true
+    - name: Delete shared discovery InfraEnv
+      ansible.builtin.command:
+        cmd: oc delete infraenv {{ caas_discovery_infraenv_name }} -n {{ caas_discovery_infraenv_namespace }} --wait=false
+      environment:
+        KUBECONFIG: /root/.kube/config
+      failed_when: false
+      changed_when: true
 
-# Step 4: Delete InfraEnv namespace
-- name: Delete InfraEnv namespace
-  ansible.builtin.command:
-    cmd: oc delete namespace {{ caas_discovery_infraenv_namespace }} --wait=false
-  environment:
-    KUBECONFIG: /root/.kube/config
-  failed_when: false
-  changed_when: true
+    - name: Delete shared discovery InfraEnv namespace
+      ansible.builtin.command:
+        cmd: oc delete namespace {{ caas_discovery_infraenv_namespace }} --wait=false
+      environment:
+        KUBECONFIG: /root/.kube/config
+      failed_when: false
+      changed_when: true
 
-# Step 5: Shut down discovery VMs and clean up disks
-- name: Find discovery VMs
+# Step 5: Shut down worker VMs and clean up disks
+- name: Find worker VMs
   ansible.builtin.shell:
     cmd: virsh list --all --name | grep "{{ item }}" || true
   register: _discovery_vm_lookup
