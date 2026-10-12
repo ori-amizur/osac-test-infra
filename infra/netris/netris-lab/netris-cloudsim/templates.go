@@ -3,9 +3,9 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"github.com/Masterminds/sprig/v3"
 	"net"
 	"text/template"
-	"github.com/Masterminds/sprig/v3"
 )
 
 type TmplMapEachDevBlock map[string]interface{}
@@ -996,7 +996,7 @@ ethernets:
         via: 192.168.122.1
     nameservers:
       addresses:
-        - {{ .dnsServer }}
+        - {{ .mgmtDnsServer }}
   ens4:
     dhcp4: false
     dhcp6: false

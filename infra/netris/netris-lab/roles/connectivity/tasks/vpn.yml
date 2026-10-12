@@ -59,6 +59,14 @@
           journalctl -b -u openvpn@server --no-pager -n 200 2>&1 || true
           echo "=== resolver configuration ==="
           cat /etc/resolv.conf 2>&1 || true
+          echo "=== effective resolver state ==="
+          resolvectl status 2>&1 || true
+          echo "=== DNS query for Ubuntu package host ==="
+          resolvectl query security.ubuntu.com 2>&1 || true
+          echo "=== DNS query for OpenVPN file host ==="
+          resolvectl query raw.githubusercontent.com 2>&1 || true
+          echo "=== guest routes ==="
+          ip route 2>&1 || true
           echo "=== raw.githubusercontent.com lookup ==="
           getent ahosts raw.githubusercontent.com 2>&1 || true
           echo "=== HTTPS check to OpenVPN file host ==="

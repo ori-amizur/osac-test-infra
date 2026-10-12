@@ -57,6 +57,9 @@ mgmt_bridge_name: "br-mgmt"
 mgmt_bridge_ip: "192.168.16.254"
 mgmt_bridge_cidr: "192.168.16.254/20"
 public_bridge_name: "br-public"
+# Use libvirt's DNS proxy on the management VM's NAT/bootstrap network.
+# dns_server remains the resolver handed to Netris-managed guest networks.
+mgmt_server_dns: "192.168.122.1"
 
 # --- IPAM (all private, no public IPs needed) ---
 ipam_private_allocation: "10.0.0.0/8"

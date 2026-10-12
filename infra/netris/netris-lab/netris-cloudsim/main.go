@@ -107,6 +107,10 @@ func main() {
 			if dnsServer == "" {
 				dnsServer = "8.8.8.8"
 			}
+			mgmtDnsServer := conf.Get("mgmt_server_dns")
+			if mgmtDnsServer == "" {
+				mgmtDnsServer = "192.168.122.1"
+			}
 			vmRootPasswordHash := conf.Get("vm_root_password_hash")
 			if vmRootPasswordHash == "" {
 				vmRootPasswordHash = "$6$netrislab$5/Mp4SqWPZ0K4b5.CgvmirF5rn0M34HmAUPxgr2DP8FwVzPP/OeoIq6m8Ljwzsr138kz4LWdOjvqiQ1Nes5JE."
@@ -341,6 +345,7 @@ func main() {
 					"ctlInfo":           netrisInfo.ControllerInfo,
 					"links":             hypervisorToLinks,
 					"dnsServer":         dnsServer,
+					"mgmtDnsServer":     mgmtDnsServer,
 					"passwordHash":      vmRootPasswordHash,
 				}, "mgmt-server")
 				if err != nil {
@@ -450,7 +455,7 @@ func main() {
 						"netrisASN":             netrisInfo.SiteObject.PublicAsn,
 						"bgpPassword":           conf.Get("bgp_password"),
 						"dnsServer":             dnsServer,
-							"passwordHash":          vmRootPasswordHash,
+						"passwordHash":          vmRootPasswordHash,
 					}, "isp-server")
 					if err != nil {
 						return err
@@ -473,7 +478,7 @@ func main() {
 						"netrisASN":             netrisInfo.SiteObject.PublicAsn,
 						"bgpPassword":           conf.Get("bgp_password"),
 						"dnsServer":             dnsServer,
-							"passwordHash":          vmRootPasswordHash,
+						"passwordHash":          vmRootPasswordHash,
 					}, "isp-server")
 					if err != nil {
 						return err
@@ -504,7 +509,7 @@ func main() {
 					// Specific resource values
 					specificHostVCPUs := 4     // CPUs for specific hosts (0 for server_vcpu value)
 					specificHostMemory := 8192 // Memory in MB for specific hosts (0 for server_memory value)
-					specificHostVolume := 100   // Volume size in GB for specific hosts (0 for server_volume_size or 6 GB)
+					specificHostVolume := 100  // Volume size in GB for specific hosts (0 for server_volume_size or 6 GB)
 
 					// Get hypers_list from config and parse as slice
 					var hyperIPs []string
