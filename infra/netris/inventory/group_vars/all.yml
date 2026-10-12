@@ -1,8 +1,8 @@
 # Netris Lab
 netris_lab_dir: "{{ inventory_dir }}/../netris-lab"
 ew_fabric_enable: 0
-# Internal resolver reachable from the isolated OCP VNet; guest DNS queries to
-# public 8.8.8.8 are blocked in this lab.
+# Resolver used by isolated lab guests and Netris-managed networks. K3s uses
+# the runner's upstream resolver separately (or k3s_dns_server if overridden).
 dns_server: "10.11.5.160"
 
 # Netris Controller (URL is discovered dynamically by configure-netris role)

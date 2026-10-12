@@ -10,11 +10,39 @@
     path: /etc/rancher/k3s
     state: directory
 
+- name: Detect the host's first non-loopback DNS resolver
+  ansible.builtin.command:
+    argv:
+      - awk
+      - '/^[[:space:]]*nameserver[[:space:]]+/ && $2 !~ /^127[.]/ && $2 != "::1" { print $2; exit }'
+      - /etc/resolv.conf
+  register: _k3s_host_dns
+  changed_when: false
+  failed_when: false
+
+- name: Select the DNS resolver for K3s pods
+  ansible.builtin.set_fact:
+    _k3s_dns_server: "{{ k3s_dns_server | default(_k3s_host_dns.stdout | trim, true) }}"
+
+- name: Require a non-loopback DNS resolver for K3s pods
+  ansible.builtin.assert:
+    that:
+      - _k3s_dns_server | length > 0
+      - _k3s_dns_server.split('.') | first != '127'
+      - _k3s_dns_server != '::1'
+    fail_msg: >-
+      No non-loopback resolver was found for K3s pods. Set k3s_dns_server to a
+      resolver reachable from this host and its pods.
+
+- name: Report the DNS resolver selected for K3s pods
+  ansible.builtin.debug:
+    msg: "K3s pods will use DNS resolver {{ _k3s_dns_server }}"
+
 - name: Write K3s resolv.conf
   copy:
     dest: /etc/rancher/k3s/resolv.conf
     content: |
-      nameserver {{ dns_server | default('8.8.8.8') }}
+      nameserver {{ _k3s_dns_server }}
     mode: "0644"
 
 - name: Write K3s config

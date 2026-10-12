@@ -117,6 +117,19 @@
   changed_when: false
   failed_when: false
 
+- name: Gather redacted Helm installer logs and events
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ playbook_dir }}/../scripts/capture_k3s_installer_diagnostics.py"
+      - "{{ _gather_dir }}/lab/k3s/helm-installer-diagnostics.txt"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    NETRIS_PASSWORD: "{{ netris_password | default('') }}"
+  changed_when: false
+  failed_when: false
+  no_log: true
+
 # ── Netris controller API ──
 - name: Discover Netris controller URL for gather
   ansible.builtin.shell: kubectl get svc traefik -n kube-system -o jsonpath='{.spec.ports[?(@.name=="web")].nodePort}'

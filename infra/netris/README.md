@@ -138,7 +138,9 @@ worker BMIs and selected BMH statuses. The Netris workflow starts serial-console
 ClusterOrder provisioning and stops it after deployment/tests. Its
 `caas/worker-diagnostics/` artifact directory contains those boot logs, a
 redacted snapshot of those resources, and the AAP job IDs that link to stdout
-in the separate OSAC artifact.
+in the separate OSAC artifact. The infrastructure artifact also includes
+redacted K3s Helm installer pod logs and warning events at
+`lab/k3s/helm-installer-diagnostics.txt`.
 
 ### Destroy
 
@@ -374,7 +376,8 @@ make deploy-osac EXTRA_VARS='{"osac_branch": "feature-x"}'
 | `netris_username` | `netris` | Netris API username |
 | `netris_password` | *(required)* | Netris API password — set in your local config, validated at deploy time |
 | `ew_fabric_enable` | `0` | East-West fabric (0=NS only) |
-| `dns_server` | `10.11.5.160` | Default lab upstream resolver; override when running outside the lab |
+| `dns_server` | `10.11.5.160` | Resolver for isolated lab guests and Netris-managed networks; override outside this lab |
+| `k3s_dns_server` | First non-loopback resolver in host `/etc/resolv.conf` | Resolver for K3s pods; set explicitly if the host resolver is not reachable from pods |
 | `caas_cluster_template` | `osac.templates.ocp_ci_small` | Cluster template for CaaS cluster creation |
 | `caas_cluster_name` | `caas-ci-cluster` | CaaS cluster name |
 | `caas_host_type_id` | `ci-worker` | Resource-class name; selected BMHs receive this value in the BareMetalInstanceType selector label |
@@ -438,18 +441,20 @@ make setup-maas MAAS_DISCOVERY_MEMORY_MB=49152
 | `osac_external_ip_pool_cidr` | `198.51.100.24/29` | OSAC tenant ExternalIPPool CIDR; host routes/masquerades it toward the softgate. Must not overlap the mgmt nat/l4lb/bgp pools. OSAC creates the Netris allocation itself. | defaults only |
 | `netris_username` | `netris` | Netris API username | defaults only |
 | `netris_password` | *(required)* | Netris API password — no default, set in local config | yes |
-| `dns_server` | `10.11.5.160` | Lab resolver threaded through cloud-init, Netris topology, dnsmasq/DHCP, and the OCP NMState resolver. Override when running outside the lab | yes |
+| `dns_server` | `10.11.5.160` | Resolver for lab guests and Netris-managed networks, including cloud-init, topology, DHCP, and OCP NMState | yes |
+| `k3s_dns_server` | First non-loopback resolver in host `/etc/resolv.conf` | K3s pod resolver; override if the host's upstream resolver is unreachable from pods | defaults only |
 
-Set `dns_server` when the lab host cannot reach public DNS resolvers. Override per-run via `EXTRA_VARS`, or set it permanently in [`inventory/group_vars/all.yml`](inventory/group_vars/all.yml):
+`dns_server` configures DNS for lab guests and Netris-managed networks. K3s pods
+use the lab host's first non-loopback resolver so they can resolve external
+chart and image registries; set `k3s_dns_server` explicitly if that resolver
+cannot be reached from pods. Override either value per run with `EXTRA_VARS`:
 
 ```bash
-# Per-run override (highest precedence)
+# Lab guest/Netris DNS resolver
 make deploy EXTRA_VARS="dns_server=10.0.0.1"
-```
 
-```yaml
-# Persistent: inventory/group_vars/all.yml
-dns_server: "10.0.0.1"
+# K3s pod resolver, when the host's resolver is not reachable from pods
+make deploy-infra EXTRA_VARS="k3s_dns_server=172.31.0.2"
 ```
 
 #### OSAC Deployment

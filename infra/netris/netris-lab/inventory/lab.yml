@@ -1,6 +1,7 @@
 all:
   vars:
-    # Internal resolver reachable from VMs in this isolated lab.
+    # Resolver used by isolated lab guests and Netris-managed networks.
+    # K3s pods use the host's upstream resolver unless k3s_dns_server is set.
     dns_server: "10.11.5.160"
   hosts:
     lab:
