@@ -376,7 +376,7 @@ make deploy-osac EXTRA_VARS='{"osac_branch": "feature-x"}'
 | `netris_username` | `netris` | Netris API username |
 | `netris_password` | *(required)* | Netris API password — set in your local config, validated at deploy time |
 | `ew_fabric_enable` | `0` | East-West fabric (0=NS only) |
-| `dns_server` | `10.11.5.160` | Resolver for isolated lab guests and Netris-managed networks; the management VM bootstrap interface uses `mgmt_server_dns` |
+| `dns_server` | `8.8.8.8` | Public resolver for lab guests (switches/softgates) so ZTP/agent installs can resolve public hosts; must be reachable from the guests. The management VM bootstrap interface uses `mgmt_server_dns` |
 | `mgmt_server_dns` | `192.168.122.1` | Resolver for the management VM's libvirt NAT interface, used for package and cloud-init downloads |
 | `softgate_bootstrap_dns` | `8.8.8.8` | Public resolver for SoftGate cloud-init and Netris agent installation (must resolve get.netris.io / archive.ubuntu.com); SoftGates restore `dns_server` for runtime after install |
 | `k3s_dns_server` | First non-loopback resolver in host `/etc/resolv.conf` | Resolver for K3s pods; set explicitly if the host resolver is not reachable from pods |
@@ -443,7 +443,7 @@ make setup-maas MAAS_DISCOVERY_MEMORY_MB=49152
 | `osac_external_ip_pool_cidr` | `198.51.100.24/29` | OSAC tenant ExternalIPPool CIDR; host routes/masquerades it toward the softgate. Must not overlap the mgmt nat/l4lb/bgp pools. OSAC creates the Netris allocation itself. | defaults only |
 | `netris_username` | `netris` | Netris API username | defaults only |
 | `netris_password` | *(required)* | Netris API password — no default, set in local config | yes |
-| `dns_server` | `10.11.5.160` | Resolver for isolated Netris/CaaS networks, topology, DHCP, and OCP NMState; mgmt-server bootstrap uses `mgmt_server_dns` | yes |
+| `dns_server` | `8.8.8.8` | Public resolver for lab guests (switches/softgates); must be reachable from the guests so ZTP/agent installs resolve public hosts. OCP api/*.apps records are served by the lab dnsmasq (configure-dns), not this resolver. mgmt-server bootstrap uses `mgmt_server_dns` | yes |
 | `mgmt_server_dns` | `192.168.122.1` | Resolver for mgmt-server's `ens3` libvirt NAT interface during package bootstrap | defaults only |
 | `softgate_bootstrap_dns` | `8.8.8.8` | Public resolver used by SoftGate cloud-init and agent installation (must resolve public installer hosts); SoftGates restore `dns_server` for runtime after install | defaults only |
 | `k3s_dns_server` | First non-loopback resolver in host `/etc/resolv.conf` | K3s pod resolver; override if the host's upstream resolver is unreachable from pods | defaults only |
