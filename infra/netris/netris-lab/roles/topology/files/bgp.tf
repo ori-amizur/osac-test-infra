@@ -34,30 +34,23 @@ resource "netris_subnet" "l4lb-pool" {
   depends_on                      = [netris_allocation.public-l4lb-allocation]
 }
 
-# E-BGP peer ports. These must be FREE ns-leaf-0 ports, distinct from the
-# SoftGate eth1 link ports (swp37-swp40, consumed by netris_link.softgates-eth1):
-# Netris rejects reusing a link port here ("already used in another service").
-# swp61-swp64 are free whole ports (the non-breakout equivalent of the old
-# swp51s0-s3). NOTE: with these ports the sessions apply but do not establish
-# (0/4) — see infra/netris/logs/lab/ebgp/ diagnostics; the correct peering
-# config is still under investigation.
 data "netris_network_interface" "sg0" {
-  name                            = "swp61@ns-leaf-0"
+  name                            = "swp51s0@ns-leaf-0"
   depends_on                      = [netris_switch.north-south-leaf]
 }
 
 data "netris_network_interface" "sg1" {
-  name                            = "swp62@ns-leaf-0"
+  name                            = "swp51s1@ns-leaf-0"
   depends_on                      = [netris_switch.north-south-leaf]
 }
 
 data "netris_network_interface" "sg2" {
-  name                            = "swp63@ns-leaf-0"
+  name                            = "swp51s2@ns-leaf-0"
   depends_on                      = [netris_switch.north-south-leaf]
 }
 
 data "netris_network_interface" "sg3" {
-  name                            = "swp64@ns-leaf-0"
+  name                            = "swp51s3@ns-leaf-0"
   depends_on                      = [netris_switch.north-south-leaf]
 }
 
