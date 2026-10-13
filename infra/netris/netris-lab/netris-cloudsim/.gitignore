@@ -2,3 +2,8 @@ old.xml
 new.xml
 .terraform*
 terraform.tfstate*
+
+# Compiled Pulumi program — Pulumi (runtime: go) rebuilds this from source on
+# every `pulumi up`, so the binary must not be tracked or a local `go build`
+# will dirty the tree.
+/netris-air

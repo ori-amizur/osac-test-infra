@@ -23,6 +23,7 @@
       - "--exclude=.git"
       - "--exclude=Pulumi.*.yaml"
       - "--exclude=.pulumi"
+      - "--exclude=netris-air"
   delegate_to: "{{ inventory_hostname }}"
 
 - name: Render Pulumi config
