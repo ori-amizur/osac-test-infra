@@ -20,6 +20,14 @@ inputs:
     description: "Path to JUnit XML (included in artifact if it exists)"
     required: false
     default: ""
+  aap-job-ids-file:
+    description: "Optional JSON file listing AAP job IDs to collect instead of scanning recent jobs"
+    required: false
+    default: ""
+  aap-jobs-only:
+    description: "Collect only the related AAP job output"
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -31,8 +39,13 @@ runs:
         KUBECONFIG: ${{ inputs.kubeconfig-path }}
         E2E_NAMESPACE: ${{ inputs.namespace }}
         JUNIT_PATH: ${{ inputs.junit-path }}
+        AAP_JOB_IDS_FILE: ${{ inputs.aap-job-ids-file }}
+        AAP_JOBS_ONLY: ${{ inputs.aap-jobs-only }}
       run: |
         ARTIFACT_DIR="${RUNNER_TEMP}/osac-artifacts"
+        rm -rf -- "${ARTIFACT_DIR}"
+        mkdir -p "${ARTIFACT_DIR}"
+        rm -f "${RUNNER_TEMP}/osac-artifacts-redaction-complete"
         if timeout 900 "$GITHUB_WORKSPACE/scripts/gather-osac-logs.sh" "${ARTIFACT_DIR}"; then
           touch "${ARTIFACT_DIR}/.redaction-complete"
         fi
@@ -42,15 +55,18 @@ runs:
       shell: bash
       env:
         ARTIFACT_DIR: ${{ runner.temp }}/osac-artifacts
+        REDACTION_MARKER: ${{ runner.temp }}/osac-artifacts-redaction-complete
       run: |
         if [[ -d "${ARTIFACT_DIR}" ]] && [[ ! -f "${ARTIFACT_DIR}/.redaction-complete" ]]; then
           echo "::error::Gather script did not complete — refusing to upload"
           rm -rf "${ARTIFACT_DIR}"
+          rm -f "${REDACTION_MARKER}"
           exit 1
         fi
         rm -f "${ARTIFACT_DIR}/.redaction-complete" 2>/dev/null || true
 
     - name: Scan artifacts with gitleaks
+      id: gitleaks-scan
       if: always()
       shell: bash
       env:
@@ -155,6 +171,17 @@ runs:
         done
 
         rm -rf "${REPORT_DIR}"
+
+    - name: Mark redacted artifacts ready for reuse
+      if: always() && steps.gitleaks-scan.outcome == 'success'
+      shell: bash
+      env:
+        ARTIFACT_DIR: ${{ runner.temp }}/osac-artifacts
+        REDACTION_MARKER: ${{ runner.temp }}/osac-artifacts-redaction-complete
+      run: |
+        if [[ -d "${ARTIFACT_DIR}" ]]; then
+          touch "${REDACTION_MARKER}"
+        fi
 
     - name: Upload artifacts
       if: always()

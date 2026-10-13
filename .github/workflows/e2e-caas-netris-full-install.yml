@@ -780,14 +780,105 @@ jobs:
           make -C infra/netris capture-caas-worker-diagnostics
           CAAS_WORKER_DIAGNOSTICS_ACTION=collect EXTRA_VARS="${EXTRA_VARS}"
 
+      - name: Gather related AAP worker job artifacts
+        if: always() && steps.deploy-osac.outcome != 'skipped' && steps.deploy-osac.outcome != ''
+        timeout-minutes: 5
+        continue-on-error: true
+        uses: ./.github/actions/gather-artifacts
+        with:
+          namespace: osac-e2e-ci
+          kubeconfig-path: /root/.kube/config
+          artifact-name: caas-aap-jobs-${{ github.run_id }}
+          aap-job-ids-file: ${{ github.workspace }}/infra/netris/logs/caas/worker-diagnostics/aap-job-ids.json
+          aap-jobs-only: "true"
+
+      - name: Include redacted AAP worker output in Netris artifact
+        if: always()
+        timeout-minutes: 2
+        continue-on-error: true
+        shell: bash
+        env:
+          OSAC_ARTIFACT_DIR: ${{ runner.temp }}/osac-artifacts
+          OSAC_REDACTION_MARKER: ${{ runner.temp }}/osac-artifacts-redaction-complete
+          WORKER_DIAGNOSTICS_DIR: infra/netris/logs/caas/worker-diagnostics
+        run: |
+          AAP_OUTPUT_DIR="${WORKER_DIAGNOSTICS_DIR}/aap-jobs"
+          mkdir -p "${WORKER_DIAGNOSTICS_DIR}"
+          rm -rf -- "${AAP_OUTPUT_DIR}"
+          mkdir -p "${AAP_OUTPUT_DIR}"
+          status="redacted-source-unavailable"
+
+          if [[ -f "${OSAC_REDACTION_MARKER}" && -d "${OSAC_ARTIFACT_DIR}/aap-jobs" ]]; then
+            cp -a "${OSAC_ARTIFACT_DIR}/aap-jobs/." "${AAP_OUTPUT_DIR}/"
+            output_count="$(find "${AAP_OUTPUT_DIR}" -maxdepth 1 -type f | wc -l)"
+            if [[ "${output_count}" -gt 0 ]]; then
+              status="captured"
+            else
+              status="collector-completed-no-output"
+            fi
+          fi
+
+          captured_files_json="$(find "${AAP_OUTPUT_DIR}" -maxdepth 1 -type f -printf 'aap-jobs/%f\n' 2>/dev/null | sort | jq -Rsc 'split("\n") | map(select(length > 0))')"
+          jq -n \
+            --arg capturedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg status "${status}" \
+            --argjson capturedFiles "${captured_files_json}" \
+            '{capturedAt: $capturedAt, status: $status, capturedFiles: $capturedFiles}' \
+            > "${WORKER_DIAGNOSTICS_DIR}/aap-capture-status.json"
+
       - name: Gather OSAC test artifacts
         if: always() && steps.deploy-osac.outcome != 'skipped' && steps.deploy-osac.outcome != ''
+        continue-on-error: true
         uses: ./.github/actions/gather-artifacts
         with:
           namespace: osac-e2e-ci
           kubeconfig-path: /root/.kube/config
           artifact-name: osac-logs-caas-netris-full-install-${{ github.run_id }}
           junit-path: ${{ runner.temp }}/test-output/junit.xml
+          aap-job-ids-file: ${{ github.workspace }}/infra/netris/logs/caas/worker-diagnostics/aap-job-ids.json
+
+      - name: Include redacted OSAC worker diagnostics in Netris artifact
+        if: always()
+        timeout-minutes: 2
+        continue-on-error: true
+        shell: bash
+        env:
+          OSAC_ARTIFACT_DIR: ${{ runner.temp }}/osac-artifacts
+          OSAC_REDACTION_MARKER: ${{ runner.temp }}/osac-artifacts-redaction-complete
+          WORKER_DIAGNOSTICS_DIR: infra/netris/logs/caas/worker-diagnostics
+        run: |
+          DESTINATION="${WORKER_DIAGNOSTICS_DIR}/osac"
+          rm -rf -- "${DESTINATION}"
+          mkdir -p "${DESTINATION}"
+          copied_files=()
+          status="redacted-source-unavailable"
+
+          if [[ -f "${OSAC_REDACTION_MARKER}" && -d "${OSAC_ARTIFACT_DIR}" ]]; then
+            status="redacted-source-available"
+            for filename in \
+              cluster-order-agents.yaml \
+              cluster-order-infraenvs.txt \
+              discovery-agents.yaml \
+              discovery-infraenvs.txt; do
+              if [[ -f "${OSAC_ARTIFACT_DIR}/${filename}" ]]; then
+                cp "${OSAC_ARTIFACT_DIR}/${filename}" "${DESTINATION}/"
+                copied_files+=("osac/${filename}")
+              fi
+            done
+            if [[ ${#copied_files[@]} -eq 0 ]]; then
+              status="redacted-source-available-no-matching-files"
+            else
+              status="captured"
+            fi
+          fi
+
+          copied_files_json="$(printf '%s\n' "${copied_files[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')"
+          jq -n \
+            --arg capturedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg status "${status}" \
+            --argjson copiedFiles "${copied_files_json}" \
+            '{capturedAt: $capturedAt, status: $status, copiedFiles: $copiedFiles}' \
+            > "${WORKER_DIAGNOSTICS_DIR}/osac-artifact-copy-status.json"
 
       # Two separate steps, each independently best-effort (rather than one
       # script with both commands): GH Actions' default bash shell runs with

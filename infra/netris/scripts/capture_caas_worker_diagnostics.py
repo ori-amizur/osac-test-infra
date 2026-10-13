@@ -24,7 +24,8 @@ BEARER_RE = re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]+")
 SENSITIVE_FIELD_RE = re.compile(
     r"(?i)([\"']?[A-Za-z0-9_.-]*(?:password|passwd|token|secret|private[_-]?key|"
     r"pull[_-]?secret|credential|authorization|api[_-]?key|access[_-]?key|"
-    r"template[_-]?parameters|extra[_-]?vars|user[_-]?data)[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)(.*)$"
+    r"template[_-]?parameters|extra[_-]?vars|user[_-]?data|proxy|ignition[_-]?config)"
+    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)(.*)$"
 )
 SENSITIVE_KEY_PARTS = (
     "password",
@@ -40,6 +41,8 @@ SENSITIVE_KEY_PARTS = (
     "templateparameters",
     "extravars",
     "userdata",
+    "proxy",
+    "ignitionconfig",
 )
 MAX_SERIAL_LOG_BYTES = 20 * 1024 * 1024
 
@@ -218,7 +221,8 @@ def start_serial_capture(output_dir: Path, patterns: list[str]) -> None:
                 f"state=$(virsh domstate {shlex.quote(vm_name)} 2>/dev/null "
                 "| tr -d '\\r' | tr '[:upper:]' '[:lower:]' || true); "
                 "if [[ \"$state\" == running ]]; then "
-                f"echo 'VM {vm_name} is running; attaching serial console'; "
+                f"printf 'VM {vm_name} detected running at %s; attaching serial console\\n' "
+                '"$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"; '
                 f"exec {shlex.join(console_capture_argv)}; "
                 "fi; sleep 0.2; done"
             )
@@ -353,6 +357,43 @@ def capture_resource(
     return items if isinstance(items, list) else []
 
 
+def capture_assisted_resources(output_dir: Path, namespaces: list[str], errors: list[str]) -> list[str]:
+    """Save Agent, InfraEnv, and event snapshots for each relevant namespace."""
+    snapshot_paths: list[str] = []
+    for namespace in dict.fromkeys(item for item in namespaces if item):
+        safe_namespace = re.sub(r"[^A-Za-z0-9_.-]", "_", namespace)
+        resources = (
+            ("agents.agent-install.openshift.io", "agents"),
+            ("infraenvs.agent-install.openshift.io", "infraenvs"),
+            ("events", "events"),
+        )
+        namespace_result = run_command(["oc", "get", "namespace", namespace, "-o", "json"], timeout=30)
+        namespace_error = None
+        namespace_missing = False
+        if namespace_result is None:
+            namespace_error = "oc get namespace failed or timed out"
+        elif namespace_result.returncode != 0:
+            namespace_error = redact_text(namespace_result.stderr.strip() or "oc get namespace returned a failure")
+            namespace_missing = "not found" in namespace_error.lower()
+
+        if namespace_error and not namespace_missing:
+            errors.append(f"{namespace}/namespace: {namespace_error}")
+
+        for resource_name, resource_suffix in resources:
+            filename = f"assisted-resources/{safe_namespace}-{resource_suffix}.json"
+            if namespace_missing:
+                write_json(output_dir / filename, {"namespace": namespace, "namespaceExists": False, "items": []})
+            elif namespace_error:
+                write_json(
+                    output_dir / filename,
+                    {"namespace": namespace, "collectionError": namespace_error, "items": []},
+                )
+            else:
+                capture_resource(output_dir, filename, resource_name, namespace, errors)
+            snapshot_paths.append(filename)
+    return snapshot_paths
+
+
 def names_matching_patterns(items: list[dict[str, Any]], patterns: list[re.Pattern[str]]) -> set[str]:
     names = [str(item.get("metadata", {}).get("name", "")) for item in items]
     return set(matching_names(names, patterns))
@@ -379,6 +420,60 @@ def safe_bmh(item: dict[str, Any]) -> dict[str, Any]:
             "status": item.get("status", {}),
         }
     )
+
+
+def unassigned_selected_bmhs(
+    selected_bmhs: list[dict[str, Any]], worker_bmis: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Summarize selected BMHs that have no corresponding BMI assignment."""
+    assigned_hosts = {
+        str(bmi.get("bareMetalHost", ""))
+        for bmi in worker_bmis
+        if isinstance(bmi, dict) and bmi.get("bareMetalHost")
+    }
+    unassigned: list[dict[str, Any]] = []
+    for bmh in selected_bmhs:
+        metadata = bmh.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        name = str(metadata.get("name", ""))
+        host_namespace = str(metadata.get("namespace", ""))
+        host_reference = f"{host_namespace}/{name}" if host_namespace else name
+        if not name or host_reference in assigned_hosts:
+            continue
+        spec = bmh.get("spec", {})
+        status = bmh.get("status", {})
+        if not isinstance(spec, dict):
+            spec = {}
+        if not isinstance(status, dict):
+            status = {}
+        conditions = status.get("conditions", [])
+        if not isinstance(conditions, list):
+            conditions = []
+        provisioning = status.get("provisioning", {})
+        if not isinstance(provisioning, dict):
+            provisioning = {}
+        unassigned.append(
+            sanitize(
+                {
+                    "name": host_reference,
+                    "creationTimestamp": metadata.get("creationTimestamp"),
+                    "online": spec.get("online"),
+                    "consumerRef": spec.get("consumerRef"),
+                    "provisioned": next(
+                        (
+                            condition.get("status") == "True"
+                            for condition in conditions
+                            if isinstance(condition, dict) and condition.get("type") == "Provisioned"
+                        ),
+                        False,
+                    ),
+                    "provisioningState": provisioning.get("state"),
+                    "conditions": conditions,
+                }
+            )
+        )
+    return unassigned
 
 
 def collect_job_ids(clusterorders: list[dict[str, Any]], bmis: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -423,7 +518,12 @@ def collect_job_ids(clusterorders: list[dict[str, Any]], bmis: list[dict[str, An
 
 
 def capture_kubernetes_snapshot(
-    output_dir: Path, namespace: str, agent_namespace: str, bmh_namespace: str, patterns: list[str]
+    output_dir: Path,
+    namespace: str,
+    agent_namespace: str,
+    shared_discovery_namespace: str,
+    bmh_namespace: str,
+    patterns: list[str],
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     errors: list[str] = []
@@ -437,6 +537,9 @@ def capture_kubernetes_snapshot(
         output_dir, "baremetalinstances.json", "baremetalinstances.osac.openshift.io", namespace, errors
     )
     capture_resource(output_dir, "order-events.json", "events", namespace, errors)
+    assisted_snapshot_paths = capture_assisted_resources(
+        output_dir, [namespace, agent_namespace, shared_discovery_namespace], errors
+    )
 
     bmh_items, bmh_error = oc_json("bmh", bmh_namespace)
     selected_bmh_names: set[str] = set()
@@ -507,6 +610,7 @@ def capture_kubernetes_snapshot(
                 "clusterOrderWorkers": order_workers,
                 "bareMetalInstances": worker_bmis,
                 "selectedBareMetalHosts": sorted(selected_bmh_names),
+                "unassignedSelectedBareMetalHosts": unassigned_selected_bmhs(selected_bmhs, worker_bmis),
             }
         ),
     )
@@ -547,17 +651,18 @@ def capture_kubernetes_snapshot(
             "agentNamespace": agent_namespace,
             # Retain the old key for readers of earlier diagnostic artifacts.
             "discoveryNamespace": agent_namespace,
+            "sharedDiscoveryNamespace": shared_discovery_namespace,
             "bmhNamespace": bmh_namespace,
             "clusterOrders": len(clusterorders),
             "bareMetalInstances": len(bmis),
             "workerBareMetalHosts": len(selected_bmhs),
+            "unassignedSelectedBareMetalHosts": len(unassigned_selected_bmhs(selected_bmhs, worker_bmis)),
             "workerVMs": worker_domains,
             "errors": errors,
-            "assistedResourcesArtifact": (
-                "OSAC logs artifact: cluster-order-agents.yaml, cluster-order-infraenvs.txt, "
-                "discovery-agents.yaml, and discovery-infraenvs.txt"
-            ),
-            "aapStdoutArtifact": "OSAC logs artifact: aap-jobs/ (job IDs in aap-job-ids.json)",
+            "assistedResourceSnapshots": assisted_snapshot_paths,
+            "aapStdoutLocation": "aap-jobs/ (captured by the focused redacting step)",
+            "aapCaptureStatus": "aap-capture-status.json",
+            "osacArtifactCopyStatus": "osac-artifact-copy-status.json",
         },
     )
 
@@ -568,6 +673,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--agent-namespace", "--discovery-namespace", dest="agent_namespace", required=True)
+    parser.add_argument("--shared-discovery-namespace", default="")
     parser.add_argument("--bmh-namespace", required=True)
     parser.add_argument("--vm-patterns-json", required=True)
     return parser.parse_args()
@@ -591,7 +697,14 @@ def main() -> int:
     stop_serial_capture(args.output_dir)
     console_dir = args.output_dir / "worker-consoles"
     trim_and_redact_serial_logs(console_dir)
-    capture_kubernetes_snapshot(args.output_dir, args.namespace, args.agent_namespace, args.bmh_namespace, patterns)
+    capture_kubernetes_snapshot(
+        args.output_dir,
+        args.namespace,
+        args.agent_namespace,
+        args.shared_discovery_namespace,
+        args.bmh_namespace,
+        patterns,
+    )
     print(f"Worker diagnostics saved under {args.output_dir}")
     return 0
 

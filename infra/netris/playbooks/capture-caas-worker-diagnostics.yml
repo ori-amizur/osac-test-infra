@@ -34,6 +34,7 @@
           --output-dir {{ _caas_worker_diagnostics_dir | quote }}
           --namespace {{ (_worker_diagnostics_namespace.stdout | default(osac_namespace, true)) | trim | quote }}
           --agent-namespace {{ caas_agent_namespace | quote }}
+          --shared-discovery-namespace {{ caas_discovery_infraenv_namespace | default('hardware-inventory') | quote }}
           --bmh-namespace {{ bmaas_bmh_namespace | quote }}
           --vm-patterns-json {{ caas_discovery_vm_patterns | to_json | quote }}
       environment:

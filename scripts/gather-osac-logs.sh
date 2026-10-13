@@ -10,6 +10,9 @@
 #   E2E_NAMESPACE          — OSAC namespace (default: osac-e2e-ci)
 #   OSAC_AGENT_NAMESPACE   — shared discovery Agent namespace (default: hardware-inventory);
 #                            order-scoped InfraEnvs/Agents are collected from E2E_NAMESPACE too
+#   AAP_JOB_IDS_FILE       — optional JSON file with related job IDs from worker diagnostics;
+#                            when set, only those jobs are fetched
+#   AAP_JOBS_ONLY          — when true, skip general cluster collection and capture only AAP jobs
 #   JUNIT_PATH             — path to JUnit XML to include (optional)
 #
 set -o nounset
@@ -25,9 +28,11 @@ if [[ ! -f "${KUBECONFIG:-}" ]]; then
 fi
 
 mkdir -p "${ARTIFACT_DIR}"
+AAP_JOBS_ONLY="${AAP_JOBS_ONLY:-false}"
 
 # ── Collect ──────────────────────────────────────────────────────────
 
+if [[ "${AAP_JOBS_ONLY}" != "true" ]]; then
 echo "Gathering OSAC logs from namespace ${E2E_NAMESPACE}..."
 
 collect_namespace_logs() {
@@ -368,6 +373,7 @@ oc get secrets -n "${E2E_NAMESPACE}" -o custom-columns='NAME:.metadata.name,TYPE
 echo "Collecting AAP operator status..."
 oc get ansibleautomationplatform -n "${E2E_NAMESPACE}" -o yaml > "${ARTIFACT_DIR}/aap-status.yaml" 2>&1 || true
 oc get automationcontroller -n "${E2E_NAMESPACE}" -o yaml > "${ARTIFACT_DIR}/automationcontroller-status.yaml" 2>&1 || true
+fi
 
 echo "Collecting AAP job stdout..."
 mkdir -p "${ARTIFACT_DIR}/aap-jobs"
@@ -381,62 +387,106 @@ if [[ -n "${AAP_ROUTE}" && -n "${AAP_ADMIN_PW}" ]]; then
     # Bound requests so an unavailable controller cannot prevent redaction
     # and upload of the diagnostics already collected.
     AAP_AUTH=(-sfSk --connect-timeout 10 --max-time 60 -u "admin:${AAP_ADMIN_PW}")
-    MAX_PAGES=5
-    page=1
-    while [[ ${page} -le ${MAX_PAGES} ]]; do
-        page_file="${ARTIFACT_DIR}/aap-jobs/jobs-page-${page}.json"
-        curl "${AAP_AUTH[@]}" \
-            "https://${AAP_ROUTE}/api/controller/v2/jobs/?page=${page}&page_size=50&order_by=-id" \
-            > "${page_file}" 2>&1 || break
-        jq -e '.results' "${page_file}" &>/dev/null || break
-        for job_id in $(jq -r '.results[]?.id // empty' "${page_file}"); do
-            status=$(jq -r ".results[] | select(.id == ${job_id}) | .status // \"unknown\"" "${page_file}")
-            name=$(jq -r ".results[] | select(.id == ${job_id}) | .name // \"unknown\"" "${page_file}" \
-                | tr -c 'A-Za-z0-9._-' '_' | head -c 100)
-            (
-                curl "${AAP_AUTH[@]}" \
-                    "https://${AAP_ROUTE}/api/controller/v2/jobs/${job_id}/stdout/?format=txt" \
-                    > "${ARTIFACT_DIR}/aap-jobs/job-${job_id}-${status}-${name}.txt" 2>&1 || true
-                if [[ "${status}" == "failed" || "${status}" == "error" ]]; then
-                    # Capture failed task names and output separately from the
-                    # full playbook log. These files pass through the same
-                    # redaction below before the gather action uploads them.
-                    for event_page in $(seq 1 5); do
-                        event_file="${ARTIFACT_DIR}/aap-jobs/job-${job_id}-failed-events-${event_page}.json"
-                        if ! curl "${AAP_AUTH[@]}" \
-                            "https://${AAP_ROUTE}/api/controller/v2/jobs/${job_id}/job_events/?failed=true&page=${event_page}&page_size=100&order_by=counter" \
-                            | jq '{count, next, results: [.results[]? | {counter, event, stdout, task: .event_data.task, task_path: .event_data.task_path}]}' \
-                            > "${event_file}"; then
-                            echo "  Could not collect failed events for AAP job ${job_id}" >&2
-                            break
+    if [[ -n "${AAP_JOB_IDS_FILE:-}" ]]; then
+        if [[ ! -f "${AAP_JOB_IDS_FILE}" ]]; then
+            echo "  AAP job ID file not found; skipping AAP job collection: ${AAP_JOB_IDS_FILE}"
+        else
+            mapfile -t related_job_ids < <(
+                jq -r '.jobs[]? | (.jobID // .jobId // empty) | tostring | select(test("^[0-9]+$"))' \
+                    "${AAP_JOB_IDS_FILE}" | sort -u
+            )
+            if [[ ${#related_job_ids[@]} -eq 0 ]]; then
+                echo "  No related AAP job IDs found in ${AAP_JOB_IDS_FILE}"
+            else
+                echo "  Capturing ${#related_job_ids[@]} AAP jobs referenced by worker diagnostics"
+                for job_id in "${related_job_ids[@]}"; do
+                    status=$(jq -r --arg job_id "${job_id}" \
+                        'first(.jobs[]? | select(((.jobID // .jobId // "") | tostring) == $job_id) | ((.state // "unknown") | tostring | ascii_downcase)) // "unknown"' \
+                        "${AAP_JOB_IDS_FILE}")
+                    status=$(printf '%s' "${status}" | tr -c 'a-z0-9._-' '_')
+                    (
+                        curl "${AAP_AUTH[@]}" \
+                            "https://${AAP_ROUTE}/api/controller/v2/jobs/${job_id}/stdout/?format=txt" \
+                            > "${ARTIFACT_DIR}/aap-jobs/job-${job_id}-${status}-related.txt" 2>&1 || true
+                        if [[ "${status}" == "failed" || "${status}" == "error" ]]; then
+                            # Failed task details accompany the full stdout for each
+                            # related job; both are redacted before artifact upload.
+                            for event_page in $(seq 1 5); do
+                                event_file="${ARTIFACT_DIR}/aap-jobs/job-${job_id}-failed-events-${event_page}.json"
+                                if ! curl "${AAP_AUTH[@]}" \
+                                    "https://${AAP_ROUTE}/api/controller/v2/jobs/${job_id}/job_events/?failed=true&page=${event_page}&page_size=100&order_by=counter" \
+                                    | jq '{count, next, results: [.results[]? | {counter, event, stdout, task: .event_data.task, task_path: .event_data.task_path}]}' \
+                                    > "${event_file}"; then
+                                    echo "  Could not collect failed events for AAP job ${job_id}" >&2
+                                    break
+                                fi
+                                [[ $(jq -r '.next // empty' "${event_file}") == "" ]] && break
+                            done
                         fi
-                        [[ $(jq -r '.next // empty' "${event_file}") == "" ]] && break
-                    done
-                fi
-            ) &
-        done
-        next=$(jq -r '.next // empty' "${page_file}")
-        [[ -z "${next}" || "${next}" == "null" ]] && break
-        page=$((page + 1))
-    done
-    wait
-    echo "  Captured stdout for $(find "${ARTIFACT_DIR}/aap-jobs" -name "job-*.txt" | wc -l) AAP jobs"
-    curl "${AAP_AUTH[@]}" \
-        "https://${AAP_ROUTE}/api/controller/v2/project_updates/?page_size=50&order_by=-id" \
-        > "${ARTIFACT_DIR}/aap-jobs/project-updates.json" 2>&1 || true
-    if ! jq -e '.results | type == "array"' "${ARTIFACT_DIR}/aap-jobs/project-updates.json" &>/dev/null; then
-        echo "  Skipping AAP project updates: invalid response"
+                    ) &
+                done
+                wait
+            fi
+        fi
     else
-    for pu_id in $(jq -r '.results[]?.id // empty' "${ARTIFACT_DIR}/aap-jobs/project-updates.json"); do
-        status=$(jq -r ".results[] | select(.id == ${pu_id}) | .status // \"unknown\"" \
-            "${ARTIFACT_DIR}/aap-jobs/project-updates.json")
+        # General runs without a related job list retain the broad recent-job
+        # collection. CaaS worker failures pass the IDs from their CR snapshot,
+        # avoiding a slow scan of unrelated AAP jobs and project updates.
+        MAX_PAGES=5
+        page=1
+        while [[ ${page} -le ${MAX_PAGES} ]]; do
+            page_file="${ARTIFACT_DIR}/aap-jobs/jobs-page-${page}.json"
+            curl "${AAP_AUTH[@]}" \
+                "https://${AAP_ROUTE}/api/controller/v2/jobs/?page=${page}&page_size=50&order_by=-id" \
+                > "${page_file}" 2>&1 || break
+            jq -e '.results' "${page_file}" &>/dev/null || break
+            for job_id in $(jq -r '.results[]?.id // empty' "${page_file}"); do
+                status=$(jq -r ".results[] | select(.id == ${job_id}) | .status // \"unknown\"" "${page_file}")
+                name=$(jq -r ".results[] | select(.id == ${job_id}) | .name // \"unknown\"" "${page_file}" \
+                    | tr -c 'A-Za-z0-9._-' '_' | head -c 100)
+                (
+                    curl "${AAP_AUTH[@]}" \
+                        "https://${AAP_ROUTE}/api/controller/v2/jobs/${job_id}/stdout/?format=txt" \
+                        > "${ARTIFACT_DIR}/aap-jobs/job-${job_id}-${status}-${name}.txt" 2>&1 || true
+                    if [[ "${status}" == "failed" || "${status}" == "error" ]]; then
+                        for event_page in $(seq 1 5); do
+                            event_file="${ARTIFACT_DIR}/aap-jobs/job-${job_id}-failed-events-${event_page}.json"
+                            if ! curl "${AAP_AUTH[@]}" \
+                                "https://${AAP_ROUTE}/api/controller/v2/jobs/${job_id}/job_events/?failed=true&page=${event_page}&page_size=100&order_by=counter" \
+                                | jq '{count, next, results: [.results[]? | {counter, event, stdout, task: .event_data.task, task_path: .event_data.task_path}]}' \
+                                > "${event_file}"; then
+                                echo "  Could not collect failed events for AAP job ${job_id}" >&2
+                                break
+                            fi
+                            [[ $(jq -r '.next // empty' "${event_file}") == "" ]] && break
+                        done
+                    fi
+                ) &
+            done
+            next=$(jq -r '.next // empty' "${page_file}")
+            [[ -z "${next}" || "${next}" == "null" ]] && break
+            page=$((page + 1))
+        done
+        wait
         curl "${AAP_AUTH[@]}" \
-            "https://${AAP_ROUTE}/api/controller/v2/project_updates/${pu_id}/stdout/?format=txt" \
-            > "${ARTIFACT_DIR}/aap-jobs/project-update-${pu_id}-${status}.txt" 2>&1 &
-    done
-    wait
+            "https://${AAP_ROUTE}/api/controller/v2/project_updates/?page_size=50&order_by=-id" \
+            > "${ARTIFACT_DIR}/aap-jobs/project-updates.json" 2>&1 || true
+        if ! jq -e '.results | type == "array"' "${ARTIFACT_DIR}/aap-jobs/project-updates.json" &>/dev/null; then
+            echo "  Skipping AAP project updates: invalid response"
+        else
+            for pu_id in $(jq -r '.results[]?.id // empty' "${ARTIFACT_DIR}/aap-jobs/project-updates.json"); do
+                status=$(jq -r ".results[] | select(.id == ${pu_id}) | .status // \"unknown\"" \
+                    "${ARTIFACT_DIR}/aap-jobs/project-updates.json")
+                curl "${AAP_AUTH[@]}" \
+                    "https://${AAP_ROUTE}/api/controller/v2/project_updates/${pu_id}/stdout/?format=txt" \
+                    > "${ARTIFACT_DIR}/aap-jobs/project-update-${pu_id}-${status}.txt" 2>&1 &
+            done
+            wait
+        fi
     fi
-    echo "  Captured $(find "${ARTIFACT_DIR}/aap-jobs" -name "project-update-*.txt" | wc -l) AAP project updates"
+    job_stdout_count=$(find "${ARTIFACT_DIR}/aap-jobs" -name 'job-*.txt' | wc -l)
+    project_update_count=$(find "${ARTIFACT_DIR}/aap-jobs" -name 'project-update-*.txt' | wc -l)
+    echo "  Captured ${job_stdout_count} AAP job stdout files and ${project_update_count} project update stdout files"
 else
     echo "  AAP route or admin password not found, skipping job stdout capture"
 fi

@@ -134,12 +134,18 @@ Agents before creating the fabric resources. MaaS continues to boot the shared
 InfraEnv in `hardware-inventory` to identify its candidate hosts. Worker
 diagnostics identify the order namespace for CaaS and `hardware-inventory` for
 MaaS. Failure artifacts collect the order InfraEnv, Agents, ClusterOrder,
-worker BMIs and selected BMH statuses. The Netris workflow starts serial-console capture before
-ClusterOrder provisioning and stops it after deployment/tests. Its
-`caas/worker-diagnostics/` artifact directory contains those boot logs, a
-redacted snapshot of those resources, and the AAP job IDs that link to stdout
-in the separate OSAC artifact. The infrastructure artifact also includes
-redacted K3s Helm installer pod logs and warning events at
+worker BMIs and selected BMH statuses. It records Agents, InfraEnvs and events
+from the order, agent and shared discovery namespaces, including Kubernetes
+creation timestamps, and summarizes any selected BMH that received no BMI
+assignment. The Netris workflow starts
+serial-console capture before ClusterOrder provisioning and stops it after
+deployment/tests; each console log records when the VM was first observed
+running. Its `caas/worker-diagnostics/` artifact directory contains those boot
+logs, the redacted resource snapshots, and the related AAP job stdout and
+failed-task events collected by a focused redacting step. The
+`aap-capture-status.json` and `osac-artifact-copy-status.json` manifests record
+whether each diagnostic collection completed. The infrastructure artifact
+also includes redacted K3s Helm installer pod logs and warning events at
 `lab/k3s/helm-installer-diagnostics.txt`.
 
 ### Destroy
@@ -577,8 +583,11 @@ The workflow requires the preliminary CaaS cluster to become `READY` before
 starting pytest. A `FAILED` state stops the wait immediately; an exhausted
 readiness wait or repeated API errors also fail deployment. OSAC diagnostics
 run after an attempted OSAC deployment even if deployment or cluster creation
-fails. The OSAC artifact's `aap-jobs/` directory contains job stdout and
-separate failed-task event files, redacted before upload.
+fails. For Netris CaaS, the worker snapshot supplies related AAP job IDs to a
+focused collector; its redacted stdout and failed-task event files are included
+in `caas-netris-artifacts`, even if the broader OSAC artifact upload is
+unavailable. The OSAC artifact also collects AAP output when that collection
+completes.
 
 > **Note**: `OSAC_VALUES_FILE` is a **Make-level** variable (not an Ansible `EXTRA_VARS` key). It controls which Helm values file is used for both `prep-osac` and `run-osac-setup`. Pass it directly to `make`, not inside `EXTRA_VARS`. Default: `values/caas-ci/values.yaml`.
 
