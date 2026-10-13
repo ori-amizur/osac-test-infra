@@ -1,9 +1,12 @@
 # Netris Lab
 netris_lab_dir: "{{ inventory_dir }}/../netris-lab"
 ew_fabric_enable: 0
-# Resolver used by isolated lab guests and Netris-managed networks. K3s uses
-# the runner's upstream resolver separately (or k3s_dns_server if overridden).
-dns_server: "10.11.5.160"
+# Public resolver for lab guests (switches/softgates) so their ZTP/agent
+# installs can resolve get.netris.io, archive.ubuntu.com, repo.netris.ai.
+# 10.11.5.160 (corporate) is not reachable from CI and breaks fabric bring-up;
+# OCP api/*.apps records are served by the lab dnsmasq (configure-dns role),
+# not this resolver. K3s uses the runner's upstream resolver (or k3s_dns_server).
+dns_server: "8.8.8.8"
 
 # Netris Controller (URL is discovered dynamically by configure-netris role)
 netris_username: "netris"

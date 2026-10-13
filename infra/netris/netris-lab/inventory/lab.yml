@@ -1,8 +1,10 @@
 all:
   vars:
-    # Resolver used by isolated lab guests and Netris-managed networks.
-    # K3s pods use the host's upstream resolver unless k3s_dns_server is set.
-    dns_server: "10.11.5.160"
+    # Public resolver for lab guests (switches/softgates) so their ZTP/agent
+    # installs can resolve public hosts; the corporate 10.11.5.160 is not
+    # reachable from CI and breaks fabric bring-up. K3s pods use the host's
+    # upstream resolver unless k3s_dns_server is set.
+    dns_server: "8.8.8.8"
   hosts:
     lab:
       ansible_connection: local
