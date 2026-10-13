@@ -60,6 +60,11 @@ public_bridge_name: "br-public"
 # Use libvirt's DNS proxy on the management VM's NAT/bootstrap network.
 # dns_server remains the resolver handed to Netris-managed guest networks.
 mgmt_server_dns: "192.168.122.1"
+# Resolver used by SoftGate cloud-init while it downloads and installs the
+# Netris agent. Defaults to dns_server (the lab resolver), which SoftGates
+# reach successfully; public resolvers like 8.8.8.8 are blocked for isolated
+# lab guests. Override only if the bootstrap path needs a different resolver.
+softgate_bootstrap_dns: "{{ dns_server }}"
 
 # --- IPAM (all private, no public IPs needed) ---
 ipam_private_allocation: "10.0.0.0/8"

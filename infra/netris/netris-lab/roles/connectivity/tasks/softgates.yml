@@ -48,64 +48,76 @@
   delay: 10
   changed_when: false
 
-- name: Wait for all softgate VMs to be SSH-accessible
-  wait_for:
-    host: "{{ item.mgmt_ip }}"
-    port: 22
-    timeout: 600
-    sleep: 15
-  loop: "{{ softgates }}"
+- name: Prepare and verify SoftGate agents
+  block:
+    - name: Wait for all softgate VMs to be SSH-accessible
+      wait_for:
+        host: "{{ item.mgmt_ip }}"
+        port: 22
+        timeout: 600
+        sleep: 15
+      loop: "{{ softgates }}"
 
-- name: Remove stale SSH host keys for softgates
-  shell: ssh-keygen -R {{ item.mgmt_ip }} 2>/dev/null || true
-  loop: "{{ softgates }}"
-  changed_when: false
+    - name: Remove stale SSH host keys for softgates
+      shell: ssh-keygen -R {{ item.mgmt_ip }} 2>/dev/null || true
+      loop: "{{ softgates }}"
+      changed_when: false
 
-- name: Wait for cloud-init to finish on softgates
-  shell: |
-    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@{{ item.mgmt_ip }} ' \
-      status=$(cloud-init status 2>/dev/null || true); \
-      case "$status" in \
-        "status: done") exit 0 ;; \
-        "status: error"*) \
-          echo "cloud-init reported an error on this softgate; details are omitted from CI output"; \
-          exit 2 ;; \
-        *) echo "$status"; exit 1 ;; \
-      esac' 2>&1
-  loop: "{{ softgates }}"
-  register: _sg_cloudinit
-  until: _sg_cloudinit.rc in [0, 2]
-  retries: 60
-  delay: 15
-  failed_when: _sg_cloudinit.rc == 2
-  changed_when: false
+    - name: Wait for cloud-init to finish on softgates
+      shell: |
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@{{ item.mgmt_ip }} ' \
+          status=$(cloud-init status 2>/dev/null || true); \
+          case "$status" in \
+            "status: done") exit 0 ;; \
+            "status: error"*) \
+              echo "cloud-init reported an error on this softgate"; \
+              exit 2 ;; \
+            *) echo "$status"; exit 1 ;; \
+          esac' 2>&1
+      loop: "{{ softgates }}"
+      register: _sg_cloudinit
+      until: _sg_cloudinit.rc in [0, 2]
+      retries: 60
+      delay: 15
+      failed_when: _sg_cloudinit.rc == 2
+      changed_when: false
 
-- name: Restore lab DNS on softgates
-  shell: |
-    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@{{ item.mgmt_ip }} \
-      "echo 'nameserver {{ dns_server }}' > /etc/resolv.conf" 2>/dev/null
-  loop: "{{ softgates }}"
-  changed_when: false
+    - name: Restore lab DNS on softgates
+      shell: |
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@{{ item.mgmt_ip }} \
+          "echo 'nameserver {{ dns_server }}' > /etc/resolv.conf" 2>/dev/null
+      loop: "{{ softgates }}"
+      changed_when: false
 
-- name: Wait for all softgate agents to become active
-  shell: |
-    failed=""
-    for ip in {{ softgates | map(attribute='mgmt_ip') | join(' ') }}; do
-      status=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@${ip} "systemctl is-active netris-sg 2>/dev/null" 2>/dev/null)
-      if [ "$status" != "active" ]; then
-        failed="${failed} ${ip}"
-      fi
-    done
-    if [ -n "$failed" ]; then
-      echo "not ready:${failed}"
-      exit 1
-    fi
-    echo "all active"
-  register: _sg_wait
-  until: _sg_wait.rc == 0
-  retries: 20
-  delay: 15
-  changed_when: false
+    - name: Wait for all softgate agents to become active
+      shell: |
+        failed=""
+        for ip in {{ softgates | map(attribute='mgmt_ip') | join(' ') }}; do
+          status=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@${ip} "systemctl is-active netris-sg 2>/dev/null" 2>/dev/null)
+          if [ "$status" != "active" ]; then
+            failed="${failed} ${ip}"
+          fi
+        done
+        if [ -n "$failed" ]; then
+          echo "not ready:${failed}"
+          exit 1
+        fi
+        echo "all active"
+      register: _sg_wait
+      until: _sg_wait.rc == 0
+      retries: 20
+      delay: 15
+      changed_when: false
+
+  rescue:
+    - name: Capture SoftGate startup diagnostics
+      ansible.builtin.include_tasks: capture_softgate_diagnostics.yml
+
+    - name: Fail because SoftGate setup did not complete
+      ansible.builtin.fail:
+        msg: >-
+          SoftGate bootstrap or agent readiness failed. Redacted per-VM diagnostics
+          are in infra/netris/logs/lab/softgates/ and will be uploaded with the run artifacts.
 
 - name: Wait for E-BGP sessions to establish
   ansible.builtin.include_tasks: ebgp_wait.yml

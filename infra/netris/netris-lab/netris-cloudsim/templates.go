@@ -138,12 +138,16 @@ runcmd:
   - [dhclient, -v]
   - |
     #!/bin/bash
+    set -Eeuo pipefail
 
     # Function to check if the network interface is up and has an IP address
     check_interface_ip() {
         while true; do
             # Replace 'ens4' with your actual interface name, e.g., 'ens3'
-            IP_ADDRESS=$(ip -4 addr show ens4 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+            # grep returns 1 before the NIC has an IP; '|| true' keeps that from
+            # aborting the script under 'set -Eeuo pipefail' so the check below
+            # can retry instead of the loop dying on the first iteration.
+            IP_ADDRESS=$(ip -4 addr show ens4 | grep -oP '(?<=inet\s)\d+(\.\d+){3}') || true
             if [ -n "$IP_ADDRESS" ]; then
                 echo "Network interface ens4 is up and has IP: $IP_ADDRESS"
                 break
@@ -179,7 +183,9 @@ runcmd:
 
 
     bash /etc/network_nics_up.sh
-    default_gw=$(ip route show default | awk '{print $3}'| head -1)
+    # '|| true': 'head -1' can close the pipe early (SIGPIPE), which 'pipefail'
+    # would surface as a non-zero status and abort the script under 'set -e'.
+    default_gw=$(ip route show default | awk '{print $3}' | head -1) || true
     sed -i "/          via: DEFAULT_GW_HERE/c\          via: $default_gw" /tmp/99-static-route.yaml
     cp /tmp/99-static-route.yaml /etc/netplan/
     chmod +x /root/cluster-ping.sh
@@ -403,6 +409,9 @@ final_message: "The system is finally up, after $UPTIME seconds"
 }
 
 func prepareCloudInitSG(diskArgs map[string]interface{}, forNetwork bool) string {
+	if _, ok := diskArgs["bootstrapDnsServer"]; !ok {
+		diskArgs["bootstrapDnsServer"] = diskArgs["dnsServer"]
+	}
 	if forNetwork {
 		tmpl, err := template.New("cloudInitVolumesUserData").Funcs(sprig.TxtFuncMap()).Parse(
 			`
@@ -415,7 +424,7 @@ ethernets:
     mtu: {{ .mtu }}
     nameservers:
       addresses:
-        - {{ .dnsServer }}
+        - {{ .bootstrapDnsServer }}
 `)
 		if err != nil {
 			panic(err)
@@ -465,7 +474,10 @@ runcmd:
     check_interface_ip() {
         while true; do
             # Replace 'ens4' with your actual interface name, e.g., 'ens3'
-            IP_ADDRESS=$(ip -4 addr show ens4 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+            # grep returns 1 before the NIC has an IP; '|| true' keeps that from
+            # aborting the script under 'set -Eeuo pipefail' so the check below
+            # can retry instead of the loop dying on the first iteration.
+            IP_ADDRESS=$(ip -4 addr show ens4 | grep -oP '(?<=inet\s)\d+(\.\d+){3}') || true
             if [ -n "$IP_ADDRESS" ]; then
                 echo "Network interface ens4 is up and has IP: $IP_ADDRESS"
                 break
@@ -479,25 +491,29 @@ runcmd:
     # Check that the network interface has an IP address
     check_interface_ip
 
-    # Function to check internet and DNS connectivity
+    # The Netris installer disables systemd-resolved. Use the bootstrap
+    # resolver before DNS checks and keep it in place through installation.
+    rm -f /etc/resolv.conf
+    echo 'nameserver {{ .bootstrapDnsServer }}' > /etc/resolv.conf
+
+    # Wait for bootstrap DNS before downloading the installer. This is
+    # bounded so a broken resolver fails cloud-init instead of hanging it.
     check_connectivity() {
-        while true; do
-            # Check basic internet connectivity
-            if ping -c 1 {{ .dnsServer }} &> /dev/null; then
-                echo "Internet is accessible."
-                # Check DNS resolution
-                if nslookup archive.ubuntu.com &> /dev/null; then
-                    echo "DNS resolution is working."
-                    break
-                else
-                    echo "DNS resolution failed. Retrying..."
-                fi
-            else
-                echo "Waiting for internet connectivity..."
+        local attempt
+        for attempt in $(seq 1 60); do
+            if getent ahostsv4 archive.ubuntu.com >/dev/null 2>&1 && \
+                getent ahostsv4 get.netris.io >/dev/null 2>&1; then
+                echo "Bootstrap DNS resolution is working."
+                return 0
             fi
+            echo "Waiting for bootstrap DNS resolution ($attempt/60)..."
             sleep 5
         done
+        echo "Bootstrap DNS did not resolve required installer hosts within 300 seconds." >&2
+        return 1
     }
+
+    check_connectivity
 
     # Match this VM's entry by mgmt IP (ens4) rather than hostname, since
     # networkd acquires the DHCP lease — not dhclient — so the dhclient
@@ -506,7 +522,8 @@ runcmd:
     ENTRY=$(awk -v ip="$MY_IP" '$3 == ip {print; exit}' /etc/netris-devices)
 
     if [ -z "$ENTRY" ]; then
-        exit 0
+        echo "No SoftGate inventory entry matches management IP $MY_IP" >&2
+        exit 1
     fi
 
     HOSTNAME=$(echo "$ENTRY" | awk '{print $1}')
@@ -519,14 +536,7 @@ runcmd:
 
     bash /etc/network_nics_up.sh
 
-    # The installer's netris-sg-hs postinst disables systemd-resolved.
-    # On Ubuntu, resolv.conf is a symlink to resolved's stub — once
-    # resolved stops, DNS breaks and the remaining apt installs fail.
-    # Replace the symlink with a static file before the installer runs.
-    rm -f /etc/resolv.conf
-    echo 'nameserver {{ .dnsServer }}' > /etc/resolv.conf
-
-    curl -fsSL https://get.netris.io | sh -s -- --lo $MAINIP --controller 10.8.0.2 --ctl-version $VERSION --hostname $HOSTNAME --auth $AUTHKEY --node-type softgate_hs --apt-repo $APT_REPO --debug
+    curl -fsSL --connect-timeout 10 --max-time 300 https://get.netris.io | sh -s -- --lo $MAINIP --controller 10.8.0.2 --ctl-version $VERSION --hostname $HOSTNAME --auth $AUTHKEY --node-type softgate_hs --apt-repo $APT_REPO --debug
 
     # Installer hardcodes DNS to 1.1.1.1 — restore lab DNS
     echo 'nameserver {{ .dnsServer }}' > /etc/resolv.conf

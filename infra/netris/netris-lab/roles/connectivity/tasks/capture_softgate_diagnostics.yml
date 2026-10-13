@@ -1,0 +1,45 @@
+---
+- name: Create SoftGate diagnostic directory
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/../logs/lab/softgates"
+    state: directory
+    mode: "0755"
+
+- name: Capture per-VM SoftGate diagnostics
+  ansible.builtin.shell: |
+    set -o pipefail
+    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@{{ item.mgmt_ip }} 'bash -s' 2>&1 <<'REMOTE' \
+      | python3 -c 'import re, sys; from capture_caas_worker_diagnostics import redact_text; text = redact_text(sys.stdin.read()); text = re.sub(r"(?i)(--auth(?:=|\\s+)|AUTH_?KEY\\s*=)\\S+", r"\\1<REDACTED>", text); sys.stdout.write(text)' \
+      > {{ (playbook_dir ~ '/../logs/lab/softgates/' ~ item.name ~ '.txt') | quote }}
+    echo "=== cloud-init status ==="
+    cloud-init status --long 2>&1 || true
+    echo "=== recent cloud-init output ==="
+    tail -n 300 /var/log/cloud-init-output.log 2>&1 || true
+    echo "=== cloud-init errors and installer messages ==="
+    grep -Ein 'netris|curl|dns|error|failed|apt' /var/log/cloud-init.log 2>/dev/null | tail -n 200 || true
+    echo "=== installed Netris packages ==="
+    dpkg-query -W -f='${binary:Package} ${Version}\\n' 'netris*' 2>&1 || true
+    echo "=== Netris systemd units ==="
+    systemctl list-unit-files '*netris*' --no-pager 2>&1 || true
+    echo "=== Netris agent services ==="
+    systemctl status netris-sg netris-sg-hs --no-pager -l 2>&1 || true
+    echo "=== Netris agent journal ==="
+    journalctl -b -u netris-sg -u netris-sg-hs --no-pager -n 200 2>&1 || true
+    echo "=== interface addresses and routes ==="
+    ip -brief address 2>&1 || true
+    ip route 2>&1 || true
+    echo "=== resolver ==="
+    cat /etc/resolv.conf 2>&1 || true
+    echo "=== installer DNS lookup ==="
+    getent ahostsv4 get.netris.io 2>&1 || true
+    REMOTE
+  args:
+    executable: /bin/bash
+  environment:
+    PYTHONPATH: "{{ playbook_dir }}/../scripts"
+  loop: "{{ softgates }}"
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+  failed_when: false
+  no_log: true

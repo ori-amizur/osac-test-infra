@@ -111,6 +111,13 @@ func main() {
 			if mgmtDnsServer == "" {
 				mgmtDnsServer = "192.168.122.1"
 			}
+			softgateBootstrapDns := conf.Get("softgate_bootstrap_dns")
+			if softgateBootstrapDns == "" {
+				// Default to the lab resolver: SoftGates install the Netris
+				// agent fine via dns_server (10.11.5.160), and public
+				// resolvers like 8.8.8.8 are blocked for isolated lab guests.
+				softgateBootstrapDns = dnsServer
+			}
 			vmRootPasswordHash := conf.Get("vm_root_password_hash")
 			if vmRootPasswordHash == "" {
 				vmRootPasswordHash = "$6$netrislab$5/Mp4SqWPZ0K4b5.CgvmirF5rn0M34HmAUPxgr2DP8FwVzPP/OeoIq6m8Ljwzsr138kz4LWdOjvqiQ1Nes5JE."
@@ -368,15 +375,16 @@ func main() {
 				}
 
 				softgateCloudInit, err := createCloudInitDisk(ctx, provider, fmt.Sprintf("%s-%s", hyperHost, "sg-cloudInit.iso"), pool_name, map[string]interface{}{
-					"hostname":          "softgate",
-					"domain":            "netris.local",
-					"mtu":               "1500",
-					"sshAuthKey":        sshAuthKeys,
-					"installedPackages": installedPackages,
-					"allVms":            hypervisorToVMs,
-					"ctlInfo":           netrisInfo.ControllerInfo,
-					"dnsServer":         dnsServer,
-					"passwordHash":      vmRootPasswordHash,
+					"hostname":           "softgate",
+					"domain":             "netris.local",
+					"mtu":                "1500",
+					"sshAuthKey":         sshAuthKeys,
+					"installedPackages":  installedPackages,
+					"allVms":             hypervisorToVMs,
+					"ctlInfo":            netrisInfo.ControllerInfo,
+					"dnsServer":          dnsServer,
+					"bootstrapDnsServer": softgateBootstrapDns,
+					"passwordHash":       vmRootPasswordHash,
 				}, "softgate")
 				if err != nil {
 					return err
