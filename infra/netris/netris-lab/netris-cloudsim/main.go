@@ -113,10 +113,13 @@ func main() {
 			}
 			softgateBootstrapDns := conf.Get("softgate_bootstrap_dns")
 			if softgateBootstrapDns == "" {
-				// Default to the lab resolver: SoftGates install the Netris
-				// agent fine via dns_server (10.11.5.160), and public
-				// resolvers like 8.8.8.8 are blocked for isolated lab guests.
-				softgateBootstrapDns = dnsServer
+				// SoftGate bootstrap must resolve PUBLIC names (get.netris.io,
+				// archive.ubuntu.com, repo.netris.ai) to install the agent, so
+				// it needs a public recursive resolver — reachable via the
+				// mgmt-server's NAT. dns_server is an internal resolver that
+				// cannot resolve those names; runtime resolv.conf is restored
+				// to dns_server after the install.
+				softgateBootstrapDns = "8.8.8.8"
 			}
 			vmRootPasswordHash := conf.Get("vm_root_password_hash")
 			if vmRootPasswordHash == "" {

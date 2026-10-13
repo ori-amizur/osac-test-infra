@@ -491,7 +491,11 @@ jobs:
 
       - name: Deploy Netris lab
         shell: bash
-        timeout-minutes: 45
+        # 60 (not 45) so a SoftGate bootstrap/agent-readiness failure runs its
+        # full Ansible retry budget and the rescue diagnostics capture before
+        # GitHub Actions kills the step — at 45m the step timed out ~40s before
+        # the rescue would have fired, losing per-SoftGate logs.
+        timeout-minutes: 60
         env:
           EXTRA_VARS: ${{ steps.extra-vars.outputs.json }}
         run: make deploy-infra INFRA=netris SUITE=caas EXTRA_VARS="${EXTRA_VARS}"

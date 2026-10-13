@@ -378,7 +378,7 @@ make deploy-osac EXTRA_VARS='{"osac_branch": "feature-x"}'
 | `ew_fabric_enable` | `0` | East-West fabric (0=NS only) |
 | `dns_server` | `10.11.5.160` | Resolver for isolated lab guests and Netris-managed networks; the management VM bootstrap interface uses `mgmt_server_dns` |
 | `mgmt_server_dns` | `192.168.122.1` | Resolver for the management VM's libvirt NAT interface, used for package and cloud-init downloads |
-| `softgate_bootstrap_dns` | `dns_server` | Resolver for SoftGate cloud-init and Netris agent installation; defaults to `dns_server` (public resolvers are blocked for isolated lab guests) |
+| `softgate_bootstrap_dns` | `8.8.8.8` | Public resolver for SoftGate cloud-init and Netris agent installation (must resolve get.netris.io / archive.ubuntu.com); SoftGates restore `dns_server` for runtime after install |
 | `k3s_dns_server` | First non-loopback resolver in host `/etc/resolv.conf` | Resolver for K3s pods; set explicitly if the host resolver is not reachable from pods |
 | `caas_cluster_template` | `osac.templates.ocp_ci_small` | Cluster template for CaaS cluster creation |
 | `caas_cluster_name` | `caas-ci-cluster` | CaaS cluster name |
@@ -445,17 +445,19 @@ make setup-maas MAAS_DISCOVERY_MEMORY_MB=49152
 | `netris_password` | *(required)* | Netris API password — no default, set in local config | yes |
 | `dns_server` | `10.11.5.160` | Resolver for isolated Netris/CaaS networks, topology, DHCP, and OCP NMState; mgmt-server bootstrap uses `mgmt_server_dns` | yes |
 | `mgmt_server_dns` | `192.168.122.1` | Resolver for mgmt-server's `ens3` libvirt NAT interface during package bootstrap | defaults only |
-| `softgate_bootstrap_dns` | `dns_server` | Resolver used by SoftGate cloud-init and agent installation; defaults to `dns_server` (public resolvers are blocked for isolated lab guests) | defaults only |
+| `softgate_bootstrap_dns` | `8.8.8.8` | Public resolver used by SoftGate cloud-init and agent installation (must resolve public installer hosts); SoftGates restore `dns_server` for runtime after install | defaults only |
 | `k3s_dns_server` | First non-loopback resolver in host `/etc/resolv.conf` | K3s pod resolver; override if the host's upstream resolver is unreachable from pods | defaults only |
 
 `dns_server` configures DNS for isolated Netris/CaaS networks, including
 topology, DHCP, and OCP NMState. `mgmt_server_dns` configures the management
 VM's `ens3` interface on libvirt NAT so cloud-init can reach Ubuntu package
 repositories and the OpenVPN config host. `softgate_bootstrap_dns` is used only
-while SoftGate cloud-init installs the Netris agent; it defaults to `dns_server`
-(which SoftGates reach successfully — public resolvers such as `8.8.8.8` are
-blocked for isolated lab guests). The management VM's default is the
-libvirt gateway's DNS proxy. K3s pods use the lab host's first non-loopback
+while SoftGate cloud-init installs the Netris agent; it must be a public
+resolver (default `8.8.8.8`, reached via the mgmt-server NAT) because the
+installer resolves public hosts (get.netris.io, archive.ubuntu.com). It is
+intentionally not `dns_server`, which is an internal resolver; SoftGates
+restore `dns_server` for runtime once the agent is installed. The management
+VM's default is the libvirt gateway's DNS proxy. K3s pods use the lab host's first non-loopback
 resolver; set `k3s_dns_server` explicitly if that resolver cannot be reached
 from pods. Override these values per run with `EXTRA_VARS`:
 
@@ -466,8 +468,8 @@ make deploy EXTRA_VARS="dns_server=10.0.0.1"
 # Management VM bootstrap DNS resolver
 make deploy-infra EXTRA_VARS="mgmt_server_dns=192.168.122.1"
 
-# SoftGate bootstrap DNS resolver (defaults to dns_server)
-make deploy-infra EXTRA_VARS="softgate_bootstrap_dns=10.11.5.160"
+# SoftGate bootstrap DNS resolver (public; defaults to 8.8.8.8)
+make deploy-infra EXTRA_VARS="softgate_bootstrap_dns=1.1.1.1"
 
 # K3s pod resolver, when the host's resolver is not reachable from pods
 make deploy-infra EXTRA_VARS="k3s_dns_server=172.31.0.2"

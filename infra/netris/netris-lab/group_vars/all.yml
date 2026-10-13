@@ -61,10 +61,13 @@ public_bridge_name: "br-public"
 # dns_server remains the resolver handed to Netris-managed guest networks.
 mgmt_server_dns: "192.168.122.1"
 # Resolver used by SoftGate cloud-init while it downloads and installs the
-# Netris agent. Defaults to dns_server (the lab resolver), which SoftGates
-# reach successfully; public resolvers like 8.8.8.8 are blocked for isolated
-# lab guests. Override only if the bootstrap path needs a different resolver.
-softgate_bootstrap_dns: "{{ dns_server }}"
+# Netris agent. The installer must resolve PUBLIC names (get.netris.io,
+# archive.ubuntu.com, repo.netris.ai), so this must be a public recursive
+# resolver — reachable from the SoftGate via the mgmt-server NAT. It is
+# deliberately NOT dns_server: dns_server is an internal resolver (for OCP/
+# Netris guests to resolve internal names) and cannot resolve public hosts.
+# SoftGates restore dns_server for runtime after the agent is installed.
+softgate_bootstrap_dns: "8.8.8.8"
 
 # --- IPAM (all private, no public IPs needed) ---
 ipam_private_allocation: "10.0.0.0/8"
