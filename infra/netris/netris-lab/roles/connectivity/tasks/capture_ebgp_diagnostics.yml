@@ -1,0 +1,60 @@
+---
+- name: Create E-BGP diagnostic directory
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/../logs/lab/ebgp"
+    state: directory
+    mode: "0755"
+
+- name: Record controller-side E-BGP session summary
+  ansible.builtin.copy:
+    dest: "{{ playbook_dir }}/../logs/lab/ebgp/controller-summary.txt"
+    mode: "0644"
+    content: |
+      E-BGP established/total (as read from the Netris controller):
+      established: {{ netris_ebgp_established | default('unknown') }}
+      total:       {{ netris_ebgp_total | default('unknown') }}
+
+      bgp.tf peers each softgate on ns-leaf-0 swp37..swp40 (derived from
+      ns_fabric.leaf_to_softgate_start_port={{ ns_fabric.leaf_to_softgate_start_port | default('?') }},
+      leaf_port_breakout={{ ns_fabric.leaf_port_breakout | default('?') }}). Compare the
+      per-softgate BGP neighbor state below against those leaf ports.
+
+- name: Capture per-VM SoftGate BGP and fabric-link diagnostics
+  ansible.builtin.shell: |
+    set -o pipefail
+    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@{{ item.mgmt_ip }} 'bash -s' 2>&1 <<'REMOTE' \
+      | python3 -c 'import sys; from capture_caas_worker_diagnostics import redact_text; sys.stdout.write(redact_text(sys.stdin.read()))' \
+      > {{ (playbook_dir ~ '/../logs/lab/ebgp/' ~ item.name ~ '.txt') | quote }}
+    echo "=== netris-sg service ==="
+    systemctl status netris-sg --no-pager -l 2>&1 || true
+    echo "=== netris-sg journal (last 200) ==="
+    journalctl -b -u netris-sg --no-pager -n 200 2>&1 || true
+    echo "=== interface addresses (brief) ==="
+    ip -brief address 2>&1 || true
+    echo "=== interface link state (brief) ==="
+    ip -brief link 2>&1 || true
+    echo "=== routes ==="
+    ip route 2>&1 || true
+    echo "=== FRR: BGP summary ==="
+    vtysh -c "show bgp summary" 2>&1 || true
+    echo "=== FRR: IPv4 unicast BGP summary ==="
+    vtysh -c "show bgp ipv4 unicast summary" 2>&1 || true
+    echo "=== FRR: BGP neighbors ==="
+    vtysh -c "show bgp neighbors" 2>&1 || true
+    echo "=== FRR: interface brief ==="
+    vtysh -c "show interface brief" 2>&1 || true
+    echo "=== FRR: running config ==="
+    vtysh -c "show running-config" 2>&1 || true
+    echo "=== FRR daemons status ==="
+    systemctl status frr --no-pager -l 2>&1 || true
+    REMOTE
+  args:
+    executable: /bin/bash
+  environment:
+    PYTHONPATH: "{{ playbook_dir }}/../scripts"
+  loop: "{{ softgates }}"
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+  failed_when: false
+  no_log: true

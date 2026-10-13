@@ -34,23 +34,28 @@ resource "netris_subnet" "l4lb-pool" {
   depends_on                      = [netris_allocation.public-l4lb-allocation]
 }
 
+# These must be the ns-leaf-0 ports the SoftGate eth1 links land on (see the
+# softgates-eth1 netris_link in north-south.tf.j2). With leaf_port_breakout=1
+# (non-breakout, 1:1 swpN naming) and leaf_to_softgate_start_port=36, softgate
+# N connects to swp(37+N)@ns-leaf-0 — i.e. swp37..swp40. Keep these in sync
+# with ns_fabric.leaf_to_softgate_start_port.
 data "netris_network_interface" "sg0" {
-  name                            = "swp61@ns-leaf-0"
+  name                            = "swp37@ns-leaf-0"
   depends_on                      = [netris_switch.north-south-leaf]
 }
 
 data "netris_network_interface" "sg1" {
-  name                            = "swp62@ns-leaf-0"
+  name                            = "swp38@ns-leaf-0"
   depends_on                      = [netris_switch.north-south-leaf]
 }
 
 data "netris_network_interface" "sg2" {
-  name                            = "swp63@ns-leaf-0"
+  name                            = "swp39@ns-leaf-0"
   depends_on                      = [netris_switch.north-south-leaf]
 }
 
 data "netris_network_interface" "sg3" {
-  name                            = "swp64@ns-leaf-0"
+  name                            = "swp40@ns-leaf-0"
   depends_on                      = [netris_switch.north-south-leaf]
 }
 

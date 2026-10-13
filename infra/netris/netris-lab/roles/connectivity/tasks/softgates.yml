@@ -119,8 +119,21 @@
           SoftGate bootstrap or agent readiness failed. Redacted per-VM diagnostics
           are in infra/netris/logs/lab/softgates/ and will be uploaded with the run artifacts.
 
-- name: Wait for E-BGP sessions to establish
-  ansible.builtin.include_tasks: ebgp_wait.yml
-  vars:
-    netris_controller_url: "http://localhost:{{ traefik_np.stdout }}"
-    netris_username: "{{ netris_login }}"
+- name: Establish and verify E-BGP sessions
+  block:
+    - name: Wait for E-BGP sessions to establish
+      ansible.builtin.include_tasks: ebgp_wait.yml
+      vars:
+        netris_controller_url: "http://localhost:{{ traefik_np.stdout }}"
+        netris_username: "{{ netris_login }}"
+
+  rescue:
+    - name: Capture E-BGP diagnostics
+      ansible.builtin.include_tasks: capture_ebgp_diagnostics.yml
+
+    - name: Fail because E-BGP sessions did not establish
+      ansible.builtin.fail:
+        msg: >-
+          E-BGP sessions did not establish. Redacted per-SoftGate BGP/fabric
+          diagnostics are in infra/netris/logs/lab/ebgp/ and will be uploaded
+          with the run artifacts.
