@@ -287,11 +287,10 @@ func main() {
 			}
 			if ctlCfg.CreateEmptyPorts {
 				for emptyPortsSwName, emptyPortsSwPorts := range emptyPorts {
-					for portName, portIndex := range emptyPortsSwPorts {
+					for eachInEmptyPortsSwPorts := range emptyPortsSwPorts {
 						if _, ok := hypervisorToLinks[emptyPortsSwName]; ok {
 							hypervisorToLinks[emptyPortsSwName] = append(hypervisorToLinks[emptyPortsSwName], LinkMapping{
-								LocalPortIndex: portIndex,
-								Local:          portName,
+								Local: eachInEmptyPortsSwPorts,
 							})
 						}
 					}
@@ -1007,23 +1006,19 @@ func getFromNetris(ctx *pulumi.Context, ctlCfg NetrisController, serversGW strin
 	}
 
 	// Create a map with switchName as the key
-	allPortsBySwName := make(map[string]map[string]int)
+	allPortsBySwName := make(map[string]map[string]interface{})
 	portIndexes := make(map[int]int)
 
 	// Insert objects into the map
 	for _, obj := range allPorts {
-		portIndex, err := strconv.Atoi(obj.PortIndex)
-		if err == nil {
-			portIndexes[obj.ID] = portIndex
+		if index, err := strconv.Atoi(obj.PortIndex); err == nil {
+			portIndexes[obj.ID] = index
 		}
-		// Empty NICs preserve swpN numbering on virtual switches. Adding them to
-		// servers shifts their guest ensN names, so a configured server VNet can
-		// end up attached to a different NIC than the OS network configuration.
-		if obj.Switch.Type == "switch" && obj.Breakout == "off" && len(obj.SlavePorts) == 0 {
+		if obj.Breakout == "off" && len(obj.SlavePorts) == 0 {
 			if _, ok := allPortsBySwName[obj.SwitchName]; !ok {
-				allPortsBySwName[obj.SwitchName] = make(map[string]int)
+				allPortsBySwName[obj.SwitchName] = make(map[string]interface{})
 			}
-			allPortsBySwName[obj.SwitchName][obj.Port_] = portIndex
+			allPortsBySwName[obj.SwitchName][obj.Port_] = make(map[string]interface{})
 		}
 	}
 

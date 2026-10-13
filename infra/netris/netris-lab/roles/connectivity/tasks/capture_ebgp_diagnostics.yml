@@ -14,10 +14,18 @@
       established: {{ netris_ebgp_established | default('unknown') }}
       total:       {{ netris_ebgp_total | default('unknown') }}
 
-      bgp.tf peers each softgate on ns-leaf-0 swp37..swp40 (derived from
+      bgp.tf peers each softgate on ns-leaf-0 swp51s0..s3 (derived from
       ns_fabric.leaf_to_softgate_start_port={{ ns_fabric.leaf_to_softgate_start_port | default('?') }},
       leaf_port_breakout={{ ns_fabric.leaf_port_breakout | default('?') }}). Compare the
-      per-softgate BGP neighbor state below against those leaf ports.
+      per-softgate BGP neighbor state below against those leaf ports, and see
+      controller-ebgp-sessions.json for the controller's per-session view
+      (name, bgp_state, port, neighbor) of each upstream session.
+
+- name: Record controller-side per-session E-BGP details
+  ansible.builtin.copy:
+    dest: "{{ playbook_dir }}/../logs/lab/ebgp/controller-ebgp-sessions.json"
+    mode: "0644"
+    content: "{{ netris_ebgp_sessions | default([]) | to_nice_json }}"
 
 - name: Capture per-VM SoftGate BGP and fabric-link diagnostics
   ansible.builtin.shell: |
