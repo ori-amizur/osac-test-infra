@@ -329,6 +329,30 @@ func main() {
 						Dhcp: libvirt.NetworkDhcpArgs{
 							Enabled: pulumi.Bool(true),
 						},
+						// bmc-net is an isolated BMC/Ironic lifecycle network. By
+						// default libvirt's dnsmasq still advertises the bridge IP
+						// (10.99.0.1) as the default gateway (DHCP option 3) and as
+						// DNS (option 6). On a CaaS worker that competes with and
+						// overrides the br-mgmt default route -- the only path to the
+						// assisted-service ingress (ocp_dnat_ip) -- so the discovery
+						// agent cannot register (AgentRegistrationTimeout, 0 agents).
+						// Send option 3 and 6 empty so bmc-net provides an address
+						// for BMC reachability only and br-mgmt supplies the default
+						// route/DNS. Matches the documented "isolated, no default
+						// route" intent and fixes both the order-InfraEnv and
+						// shared-discovery boot paths at the source.
+						DnsmasqOptions: libvirt.NetworkDnsmasqOptionsArgs{
+							Options: libvirt.NetworkDnsmasqOptionsOptionArray{
+								libvirt.NetworkDnsmasqOptionsOptionArgs{
+									OptionName:  pulumi.String("dhcp-option"),
+									OptionValue: pulumi.String("3"),
+								},
+								libvirt.NetworkDnsmasqOptionsOptionArgs{
+									OptionName:  pulumi.String("dhcp-option"),
+									OptionValue: pulumi.String("6"),
+								},
+							},
+						},
 					}, pulumi.Provider(provider))
 					if err != nil {
 						return err
