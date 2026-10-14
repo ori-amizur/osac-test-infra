@@ -49,6 +49,7 @@ SENSITIVE_KEY_PARTS = (
 )
 MAX_SERIAL_LOG_BYTES = 20 * 1024 * 1024
 MAX_PACKET_LOG_BYTES = 5 * 1024 * 1024
+TCPDUMP_STANDARD_PATHS = ("/usr/sbin/tcpdump", "/sbin/tcpdump", "/usr/bin/tcpdump", "/bin/tcpdump")
 
 
 def utc_now() -> str:
@@ -72,6 +73,14 @@ def run_command(argv: list[str], timeout: int = 45) -> subprocess.CompletedProce
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def find_tcpdump() -> str | None:
+    """Find tcpdump even when the runner service PATH omits system sbin directories."""
+    executable = shutil.which("tcpdump")
+    if executable:
+        return executable
+    return next((path for path in TCPDUMP_STANDARD_PATHS if Path(path).is_file() and os.access(path, os.X_OK)), None)
 
 
 def redact_text(value: str) -> str:
@@ -413,8 +422,16 @@ def start_packet_capture(output_dir: Path, patterns: list[str], management_bridg
             )
 
     capture_status: list[dict[str, Any]] = []
-    if not shutil.which("tcpdump"):
-        errors.append("Packet capture requires tcpdump")
+    tcpdump_executable = find_tcpdump()
+    if not tcpdump_executable:
+        errors.append(
+            "Packet capture requires tcpdump; executable not found in PATH or standard system locations "
+            f"({', '.join(TCPDUMP_STANDARD_PATHS)})"
+        )
+        capture_status.extend(
+            {"interface": interface, "state": "skipped: tcpdump executable not found"}
+            for interface in sorted(captures_by_interface)
+        )
     else:
         for interface, nics in sorted(captures_by_interface.items()):
             pid_file = capture_dir / f"capture-{interface}.pid"
@@ -445,7 +462,7 @@ def start_packet_capture(output_dir: Path, patterns: list[str], management_bridg
             # Tcpdump writes decoded packet summaries only (no -A/-X or pcap),
             # and the filter excludes HTTPS application data. This records DHCP
             # options, DNS answers, and connection attempts without payloads.
-            argv = ["tcpdump", "-l", "-nn", "-e", "-vvv", "-s", "512", "-i", interface, packet_filter]
+            argv = [tcpdump_executable, "-l", "-nn", "-e", "-vvv", "-s", "512", "-i", interface, packet_filter]
             link_check = run_command(["ip", "link", "show", "dev", interface], timeout=10)
             if link_check is None or link_check.returncode != 0:
                 capture_status.append({"interface": interface, "state": "skipped: interface is unavailable"})
@@ -494,6 +511,7 @@ def start_packet_capture(output_dir: Path, patterns: list[str], management_bridg
             "bmcBridge": bmc_bridge,
             "matchedDomains": matched,
             "workerInterfaces": interfaces_by_vm,
+            "tcpdumpExecutable": tcpdump_executable,
             "captures": capture_status,
             "errors": errors,
         },

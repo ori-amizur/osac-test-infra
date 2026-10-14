@@ -125,6 +125,10 @@ Type=simple
 User=${SSH_USER}
 WorkingDirectory=${RUNNER_DIR}
 EnvironmentFile=${ENV_FILE}
+# The provisioning SSH shell and the systemd-launched runner can have different
+# PATH values. Include standard sbin directories so tools installed there
+# (for example tcpdump and ip) are available to workflow steps.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=${RUNNER_DIR}/run.sh --jitconfig \${JIT_CONFIG}
 Restart=no
 
