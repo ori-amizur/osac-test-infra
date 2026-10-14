@@ -500,6 +500,7 @@ make deploy-infra EXTRA_VARS="k3s_dns_server=172.31.0.2"
 | `osac_aap_ee_image` | `""` | Optional separate AAP job execution image; local images use the Controller's `missing` pull policy | no |
 | `osac_ui_image` | `""` | osac-ui container image override | no |
 | `bmf_operator_image` | `""` | bare-metal-fulfillment-operator container image override | no |
+| `metering_service_image_digest` | `""` | Optional immutable SHA-256 digest for the GHCR metering-service image | no |
 | `aap_project_git_uri` | `""` | AAP config-as-code project git URI override (defaults to installer value) | no |
 | `aap_project_git_branch` | `""` | AAP config-as-code project git branch override (test PR playbooks/collections) | no |
 

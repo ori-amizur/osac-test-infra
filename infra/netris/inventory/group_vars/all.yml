@@ -82,6 +82,8 @@ osac_aap_image: ""
 osac_aap_ee_image: ""  # Defaults to osac_aap_image when only one AAP image is supplied
 osac_ui_image: ""
 bmf_operator_image: ""
+# Optional immutable SHA-256 digest for the GHCR metering-service image.
+metering_service_image_digest: ""
 
 # AAP config-as-code project git overrides (leave empty to use installer defaults).
 # Point AAP at a PR branch to test osac-aap playbook/collection changes; the

@@ -143,6 +143,13 @@
   register: _fulfillment_chart_values
   when: fulfillment_service_image | default('') | length > 0
 
+- name: Validate metering service image digest override
+  ansible.builtin.assert:
+    that:
+      - metering_service_image_digest is match('^[0-9a-f]{64}$')
+    fail_msg: "metering_service_image_digest must be a 64-character lowercase SHA-256 digest"
+  when: metering_service_image_digest | default('') | length > 0
+
 - name: Build fulfillment image overrides for the selected chart
   ansible.builtin.set_fact:
     _fulfillment_images: >-
@@ -168,6 +175,8 @@
 # bootstrap.imagePullPolicy is not a supported chart value. The bootstrap
 # Job omits it, so Kubernetes defaults our non-latest CI tags to IfNotPresent.
 # AAP job execution uses the separate, supported configAsCode.eeImagePull below.
+# The metering subchart renders repository:tag. Place @sha256 in repository
+# and the digest hex in tag so Helm renders an immutable repository@sha256:hex ref.
 - name: Build values overrides
   ansible.builtin.set_fact:
     _values_overrides: >-
@@ -234,6 +243,12 @@
                'pullPolicy': ('IfNotPresent' if bmf_operator_image.startswith('localhost/') else 'Always')
              }}}
                     if bmf_operator_image | default('') | length > 0 else {}), recursive=true)
+         | combine(({'metering': {'image': {
+               'repository': 'ghcr.io/osac-project/metering-service@sha256',
+               'tag': metering_service_image_digest | default(''),
+               'pullPolicy': 'Always'
+             }}}
+                    if metering_service_image_digest | default('') | length > 0 else {}), recursive=true)
          | combine(({'aap': {'configAsCode': {'projectGitUri': aap_project_git_uri}}}
                     if aap_project_git_uri | default('') | length > 0 else {}), recursive=true)
          | combine(({'aap': {'configAsCode': {'projectGitBranch': aap_project_git_branch}}}

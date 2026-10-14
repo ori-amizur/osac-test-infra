@@ -94,7 +94,8 @@ All variables in `inventory/group_vars/all.yml`. Key sections:
 - **Netris networking**: `ocp_vpc_name`, `ocp_subnet_cidr`, SNAT/DNAT IPs
 - **OCP install**: `ocp_version`, `ocp_cluster_name`, `ocp_base_domain`
 - **OSAC**: `osac_repo/branch`, `osac_namespace`, `osac_values_file`
-- **Component images**: `osac_operator_image`, `fulfillment_service_image` (empty = defaults)
+- **Component images**: `osac_operator_image`, `fulfillment_service_image` (empty = defaults),
+  `metering_service_image_digest` (empty = profile image)
 - **Snapshot**: `snapshot_flavor_image`, `snapshot_flavor_dir`, `snapshot_recert_image`, `snapshot_osac_namespace`, `snapshot_osac_values_file`
 - **CaaS / MaaS**: `caas_use_order_infraenv_for_worker_boot` (true for CaaS, false for MaaS), `caas_discovery_vm_patterns`, `caas_host_type_id`, `caas_cluster_name`, `caas_agents`, `caas_resource_class_hostnames` (empty = all configured workers); per-VM sizing via `caas_discovery_vcpu_overrides` / `caas_discovery_memory_mb_overrides`; MaaS Makefile `MAAS_*` (incl. `MAAS_DISCOVERY_MEMORY_MB_OVERRIDES`, default h01→16GiB)
 

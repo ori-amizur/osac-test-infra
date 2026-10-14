@@ -423,7 +423,12 @@ jobs:
           # This profile deploys CaaS over the Metal3 BMaaS backend. Keep the
           # infrastructure setup aligned with caas-ci's bmf.metal3.enabled;
           # prep-osac uses this flag to create the required Provisioning CR.
-          EXTRA_VARS='{"bare_metal_services":true}'
+          # The moving metering-service:latest image now requires an issuer
+          # setting that this selected OSAC branch does not provide. Pin the
+          # last-known-good image until the chart and image contract align.
+          METERING_SERVICE_IMAGE_DIGEST="05c7911ef53b19694488f08191677149c47b00466053ae599ec034031a19c85c"
+          EXTRA_VARS=$(jq -cn --arg digest "$METERING_SERVICE_IMAGE_DIGEST" \
+            '{bare_metal_services:true,metering_service_image_digest:$digest}')
           declare -A OVERRIDES=(
             [osac_operator_image]="$OSAC_OPERATOR_IMAGE"
             [fulfillment_service_image]="$FULFILLMENT_SERVICE_IMAGE"
