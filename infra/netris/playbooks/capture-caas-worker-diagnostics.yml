@@ -37,6 +37,8 @@
           --shared-discovery-namespace {{ caas_discovery_infraenv_namespace | default('hardware-inventory') | quote }}
           --bmh-namespace {{ bmaas_bmh_namespace | quote }}
           --vm-patterns-json {{ caas_discovery_vm_patterns | to_json | quote }}
+          --management-bridge {{ mgmt_bridge_name | default('br-mgmt') | quote }}
+          --bmc-network {{ bmc_net_name | default('bmc-net') | quote }}
       environment:
         KUBECONFIG: /root/.kube/config
       changed_when: false

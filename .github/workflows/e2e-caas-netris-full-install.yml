@@ -689,8 +689,9 @@ jobs:
 
       # Arm serial-console readers while workers are still off. The diagnostic
       # helper attaches as soon as ClusterOrder provisioning powers each VM on,
-      # preserving its first boot output for the order InfraEnv.
-      - name: Start CaaS worker serial capture
+      # preserving first-boot serial output and DHCP/DNS/connection metadata
+      # for the order InfraEnv registration path.
+      - name: Start CaaS worker boot and network capture
         timeout-minutes: 3
         shell: bash
         continue-on-error: true
@@ -769,7 +770,7 @@ jobs:
             pytest tests/e2e/caas/ "${FILTER_ARGS[@]}" "${MARKER_ARGS[@]}" \
               -n 0 --junitxml=/tmp/test-output/junit.xml -v
 
-      - name: Capture CaaS worker diagnostics
+      - name: Capture CaaS worker boot and network diagnostics
         if: always()
         timeout-minutes: 10
         shell: bash
