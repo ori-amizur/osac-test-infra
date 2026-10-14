@@ -59,7 +59,11 @@ collect_namespace_logs() {
 
 collect_namespace_logs "${E2E_NAMESPACE}" "${ARTIFACT_DIR}"
 
-for ns in keycloak ansible-aap; do
+# multicluster-engine / assisted-installer host the assisted-service and
+# infrastructure-operator that drive agent discovery/registration. Their logs
+# show whether a CaaS worker's discovery agent ever reached the service (the
+# AgentRegistrationTimeout root cause); the namespace guard skips absent ones.
+for ns in keycloak ansible-aap multicluster-engine assisted-installer; do
     if oc get namespace "${ns}" &>/dev/null; then
         echo "Gathering logs from namespace ${ns}..."
         collect_namespace_logs "${ns}" "${ARTIFACT_DIR}/${ns}"

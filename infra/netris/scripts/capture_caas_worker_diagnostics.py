@@ -365,6 +365,11 @@ def capture_assisted_resources(output_dir: Path, namespaces: list[str], errors: 
         resources = (
             ("agents.agent-install.openshift.io", "agents"),
             ("infraenvs.agent-install.openshift.io", "infraenvs"),
+            # NMStateConfig carries the per-host discovery network config (which
+            # interface the data/VPC network uses, DHCP vs static, MAC match).
+            # It is the key artifact for diagnosing a worker whose data NIC never
+            # gets an IP and whose agent never registers.
+            ("nmstateconfigs.agent-install.openshift.io", "nmstateconfigs"),
             ("events", "events"),
         )
         namespace_result = run_command(["oc", "get", "namespace", namespace, "-o", "json"], timeout=30)
