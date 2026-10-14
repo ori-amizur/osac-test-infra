@@ -431,7 +431,8 @@ if [[ -n "${AAP_ROUTE}" && -n "${AAP_ADMIN_PW}" ]]; then
     else
         # General runs without a related job list retain the broad recent-job
         # collection. CaaS worker failures pass the IDs from their CR snapshot,
-        # avoiding a slow scan of unrelated AAP jobs and project updates.
+        # avoiding a slow scan of unrelated AAP jobs. Project updates are
+        # captured separately below in both paths.
         MAX_PAGES=5
         page=1
         while [[ ${page} -le ${MAX_PAGES} ]]; do
@@ -468,21 +469,31 @@ if [[ -n "${AAP_ROUTE}" && -n "${AAP_ADMIN_PW}" ]]; then
             page=$((page + 1))
         done
         wait
-        curl "${AAP_AUTH[@]}" \
-            "https://${AAP_ROUTE}/api/controller/v2/project_updates/?page_size=50&order_by=-id" \
-            > "${ARTIFACT_DIR}/aap-jobs/project-updates.json" 2>&1 || true
-        if ! jq -e '.results | type == "array"' "${ARTIFACT_DIR}/aap-jobs/project-updates.json" &>/dev/null; then
-            echo "  Skipping AAP project updates: invalid response"
-        else
-            for pu_id in $(jq -r '.results[]?.id // empty' "${ARTIFACT_DIR}/aap-jobs/project-updates.json"); do
-                status=$(jq -r ".results[] | select(.id == ${pu_id}) | .status // \"unknown\"" \
-                    "${ARTIFACT_DIR}/aap-jobs/project-updates.json")
-                curl "${AAP_AUTH[@]}" \
-                    "https://${AAP_ROUTE}/api/controller/v2/project_updates/${pu_id}/stdout/?format=txt" \
-                    > "${ARTIFACT_DIR}/aap-jobs/project-update-${pu_id}-${status}.txt" 2>&1 &
-            done
-            wait
-        fi
+    fi
+
+    # Project updates (git-sync) run as separate AAP unified jobs that are not
+    # referenced by the ClusterOrder, so capture them in BOTH the related-id and
+    # recent-scan paths. A failed project update makes the operator's job
+    # relaunch return HTTP 400 ("Missing a revision to run due to failed project
+    # update"); only the project-update stdout explains why the git sync failed.
+    # Also capture the projects list for status/last-update/revision context.
+    curl "${AAP_AUTH[@]}" \
+        "https://${AAP_ROUTE}/api/controller/v2/projects/?page_size=50&order_by=-id" \
+        > "${ARTIFACT_DIR}/aap-jobs/projects.json" 2>&1 || true
+    curl "${AAP_AUTH[@]}" \
+        "https://${AAP_ROUTE}/api/controller/v2/project_updates/?page_size=50&order_by=-id" \
+        > "${ARTIFACT_DIR}/aap-jobs/project-updates.json" 2>&1 || true
+    if ! jq -e '.results | type == "array"' "${ARTIFACT_DIR}/aap-jobs/project-updates.json" &>/dev/null; then
+        echo "  Skipping AAP project updates: invalid response"
+    else
+        for pu_id in $(jq -r '.results[]?.id // empty' "${ARTIFACT_DIR}/aap-jobs/project-updates.json"); do
+            status=$(jq -r ".results[] | select(.id == ${pu_id}) | .status // \"unknown\"" \
+                "${ARTIFACT_DIR}/aap-jobs/project-updates.json")
+            curl "${AAP_AUTH[@]}" \
+                "https://${AAP_ROUTE}/api/controller/v2/project_updates/${pu_id}/stdout/?format=txt" \
+                > "${ARTIFACT_DIR}/aap-jobs/project-update-${pu_id}-${status}.txt" 2>&1 &
+        done
+        wait
     fi
     job_stdout_count=$(find "${ARTIFACT_DIR}/aap-jobs" -name 'job-*.txt' | wc -l)
     project_update_count=$(find "${ARTIFACT_DIR}/aap-jobs" -name 'project-update-*.txt' | wc -l)
