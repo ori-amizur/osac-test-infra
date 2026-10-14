@@ -544,6 +544,22 @@ find "${ARTIFACT_DIR}" -type f \( -name "*.log" -o -name "*.txt" -o -name "*.jso
     exit 1
 }
 
+# Container-registry pull-secret credentials. The resolved ClusterOrder
+# pull_secret (dockerconfigjson) is serialized into AAP worker pod logs and job
+# stdout as escaped JSON (\"auth\": \"<base64>\", \"identitytoken\": \"...\"),
+# which the .dockerconfigjson and large-blob rules below do not match and which
+# is not a "password"/"token" field. Redact the per-registry auth/identitytoken
+# values in both plain and backslash-escaped JSON forms. Match any non-quote,
+# non-backslash run so it stops at the (possibly escaped) closing quote.
+find "${ARTIFACT_DIR}" -type f \( -name "*.log" -o -name "*.txt" -o -name "*.json" -o -name "*.yaml" \) \
+    -exec sed -i -E \
+        -e 's/(\\?"auth\\?"\s*:\s*\\?")[^"\\]+/\1REDACTED/g' \
+        -e 's/(\\?"[iI]dentity[tT]oken\\?"\s*:\s*\\?")[^"\\]+/\1REDACTED/g' \
+        {} + || {
+    echo "ERROR: pull-secret auth redaction failed" >&2
+    exit 1
+}
+
 # Fulfillment: break-glass credentials in controller and grpc-server logs
 # (plaintext JSON form). Broader than pod-fulfillment-* so describe/event
 # dumps that copy the same payload are covered too.
