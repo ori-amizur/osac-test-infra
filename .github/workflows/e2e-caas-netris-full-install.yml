@@ -107,6 +107,11 @@ on:
         required: false
         type: string
         default: ""
+      test-infra-ref:
+        description: "Branch or tag of test-infra"
+        required: false
+        type: string
+        default: ""
       fork-pr-author-association:
         description: "PR author_association from the caller"
         required: false
@@ -174,6 +179,7 @@ jobs:
       orchestrator-runner-label: ${{ inputs.orchestrator-runner-label }}
       tooling-check-cmds: ${{ inputs.tooling-check-cmds }}
       test-infra-repository: ${{ inputs.test-infra-repository }}
+      test-infra-ref: ${{ inputs.test-infra-ref }}
 
 
   # Fetches all 5 CaaS/Netris secrets and pushes them to the box, on the
@@ -1019,3 +1025,4 @@ jobs:
       orchestrator-runner-label: ${{ inputs.orchestrator-runner-label }}
       aws-region: ${{ inputs.aws-region }}
       test-infra-repository: ${{ inputs.test-infra-repository }}
+      test-infra-ref: ${{ inputs.test-infra-ref }}
