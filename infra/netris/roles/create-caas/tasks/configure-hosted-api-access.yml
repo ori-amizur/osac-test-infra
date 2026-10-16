@@ -1,4 +1,40 @@
 ---
+- name: Resolve the CaaS HostedCluster name from the ClusterOrder
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      oc get clusterorder -n "${CAAS_NAMESPACE}" \
+        -l "osac.openshift.io/clusterorder-uuid=${CAAS_CLUSTER_ID}" -o json |
+        python3 -c '
+      import json
+      import os
+      import sys
+
+      items = json.load(sys.stdin).get("items", [])
+      if len(items) != 1:
+          raise SystemExit(f"expected one ClusterOrder for {os.environ['CAAS_CLUSTER_ID']}, found {len(items)}")
+      hosted_cluster_name = items[0].get("status", {}).get("clusterReference", {}).get("hostedClusterName")
+      if not hosted_cluster_name:
+          raise SystemExit("ClusterOrder has no status.clusterReference.hostedClusterName")
+      print(hosted_cluster_name)
+      '
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /root/.kube/config
+    CAAS_NAMESPACE: "{{ snapshot_osac_namespace | default(osac_namespace) }}"
+    CAAS_CLUSTER_ID: "{{ caas_cluster_id }}"
+  register: _caas_hosted_cluster_name_raw
+  until:
+    - _caas_hosted_cluster_name_raw.rc == 0
+    - _caas_hosted_cluster_name_raw.stdout | trim | length > 0
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: Set the CaaS HostedCluster name
+  ansible.builtin.set_fact:
+    _caas_hosted_cluster_name: "{{ _caas_hosted_cluster_name_raw.stdout | trim }}"
+
 - name: Find the CaaS HostedCluster namespace
   ansible.builtin.shell:
     cmd: |
@@ -8,7 +44,7 @@
       import os
       import sys
 
-      expected = os.environ["CAAS_CLUSTER_NAME"]
+      expected = os.environ["CAAS_HOSTED_CLUSTER_NAME"]
       items = json.load(sys.stdin).get("items", [])
       matches = [item for item in items if item.get("metadata", {}).get("name") == expected]
       if len(matches) != 1:
@@ -18,7 +54,7 @@
     executable: /bin/bash
   environment:
     KUBECONFIG: /root/.kube/config
-    CAAS_CLUSTER_NAME: "{{ caas_cluster_name }}"
+    CAAS_HOSTED_CLUSTER_NAME: "{{ _caas_hosted_cluster_name }}"
   register: _caas_hosted_namespace_raw
   until:
     - _caas_hosted_namespace_raw.rc == 0
@@ -35,7 +71,7 @@
   ansible.builtin.shell:
     cmd: |
       set -euo pipefail
-      oc get secret "${CAAS_CLUSTER_NAME}-admin-kubeconfig" -n "${CAAS_HOSTED_NAMESPACE}" \
+      oc get secret "${CAAS_HOSTED_CLUSTER_NAME}-admin-kubeconfig" -n "${CAAS_HOSTED_NAMESPACE}" \
         -o jsonpath='{.data.kubeconfig}' | base64 -d | python3 -c '
       import re
       import sys
@@ -48,7 +84,7 @@
     executable: /bin/bash
   environment:
     KUBECONFIG: /root/.kube/config
-    CAAS_CLUSTER_NAME: "{{ caas_cluster_name }}"
+    CAAS_HOSTED_CLUSTER_NAME: "{{ _caas_hosted_cluster_name }}"
     CAAS_HOSTED_NAMESPACE: "{{ _caas_hosted_namespace }}"
   register: _caas_hosted_api_host_raw
   until:
