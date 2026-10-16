@@ -94,6 +94,20 @@
   delay: 10
   changed_when: false
 
+- name: Wait for the CaaS hosted control plane
+  ansible.builtin.command:
+    argv:
+      - oc
+      - wait
+      - hostedcluster/{{ _caas_hosted_cluster_name }}
+      - -n
+      - "{{ _caas_hosted_namespace }}"
+      - --for=condition=Available
+      - --timeout={{ caas_hosted_control_plane_timeout | default('30m') }}
+  environment:
+    KUBECONFIG: /root/.kube/config
+  changed_when: false
+
 - name: Resolve the CaaS hosted API VIP
   ansible.builtin.shell:
     cmd: |
