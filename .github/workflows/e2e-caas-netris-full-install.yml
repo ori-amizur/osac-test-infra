@@ -991,6 +991,7 @@ jobs:
           namespace: osac-e2e-ci
           kubeconfig-path: ${{ steps.artifact-kubeconfig.outputs.path }}
           artifact-name: caas-netris-artifacts
+          preserve-artifact-dir: "true"
 
       - name: Hold failed Netris lab for investigation
         if: failure() && inputs.debug-on-failure

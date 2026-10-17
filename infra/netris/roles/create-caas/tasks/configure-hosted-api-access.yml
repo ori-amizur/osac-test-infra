@@ -108,14 +108,17 @@
     KUBECONFIG: /root/.kube/config
   changed_when: false
 
-- name: Resolve the CaaS hosted API VIP
+- name: Read the CaaS hosted API Service IP
   ansible.builtin.shell:
     cmd: |
       set -euo pipefail
-      getent ahostsv4 "${CAAS_API_HOST}" | awk 'NR == 1 { print $1; exit }'
+      oc get service kube-apiserver \
+        -n "${CAAS_CONTROL_PLANE_NAMESPACE}" \
+        -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
     executable: /bin/bash
   environment:
-    CAAS_API_HOST: "{{ _caas_hosted_api_host_raw.stdout | trim }}"
+    KUBECONFIG: /root/.kube/config
+    CAAS_CONTROL_PLANE_NAMESPACE: "{{ _caas_hosted_namespace }}-{{ _caas_hosted_cluster_name }}"
   register: _caas_hosted_api_vip_raw
   until:
     - _caas_hosted_api_vip_raw.rc == 0
