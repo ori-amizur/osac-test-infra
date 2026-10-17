@@ -211,13 +211,13 @@
       - bmaas_ssh_hosts[item] is defined
       - bmaas_ssh_hosts[item] | length > 0
     fail_msg: "No stable management address is configured for CaaS worker {{ item }}."
-  loop: "{{ caas_discovery_vms }}"
+  loop: "{{ caas_discovery_vm_patterns }}"
 
 - name: Wait for the CaaS worker API proxy configuration
   ansible.builtin.shell:
     cmd: |
       set -euo pipefail
-      {% for worker in caas_discovery_vms %}
+      {% for worker in caas_discovery_vm_patterns %}
       ssh -F /dev/null -o BatchMode=yes -o ConnectTimeout=10 \
         -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
         core@{{ bmaas_ssh_hosts[worker] }} \
@@ -280,7 +280,7 @@
       exit 1
       REMOTE
     executable: /bin/bash
-  loop: "{{ caas_discovery_vms }}"
+  loop: "{{ caas_discovery_vm_patterns }}"
   loop_control:
     label: "{{ item }}"
   register: _caas_worker_api_path
