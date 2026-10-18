@@ -295,7 +295,7 @@ ensure_local_dns() {
         touch "${LOCAL_DNS_HOSTS_FILE}"
         printf '%s\n' "${api_line}" >> "${LOCAL_DNS_HOSTS_FILE}"
         dns_changed=true
-        echo "==> Added local DNS entry ${api_host} -> ${vip}"
+        echo "==> Added local DNS entry for API endpoint (namespace ${namespace})"
     fi
 
     if ! agents_json=$(oc get agent -n "${agent_namespace}" \
@@ -303,10 +303,10 @@ ensure_local_dns() {
         agents_json=""
     fi
     worker_ip=$(jq -r '
-        [.items[].status.inventory.interfaces[].ipV4Addresses[]? |
+        [.items[]?.status.inventory.interfaces[]?.ipV4Addresses[]? |
             split("/")[0] |
             select(. != "")][0] // ""
-    ' <<< "${agents_json}")
+    ' <<< "${agents_json}" 2>/dev/null || true)
     if [[ -n "${worker_ip}" ]]; then
         apps_host="console-openshift-console.apps.${order_name}.${base_domain}"
         canary_host="canary-openshift-ingress-canary.apps.${order_name}.${base_domain}"
@@ -315,7 +315,7 @@ ensure_local_dns() {
         if ! grep -qxF "${apps_line}" "${LOCAL_DNS_HOSTS_FILE}" 2>/dev/null; then
             printf '%s\n' "${apps_line}" >> "${LOCAL_DNS_HOSTS_FILE}"
             dns_changed=true
-            echo "==> Added local DNS entry ${apps_host} -> ${worker_ip}"
+            echo "==> Added local DNS entry for apps endpoint (namespace ${namespace})"
         fi
     fi
 
@@ -404,11 +404,19 @@ while true; do
 
         # Do not start VMs for a ClusterOrder that was deleted before the
         # watcher got to it (for example, the delete-before-provision test).
-        order_json=$(oc get clusterorder "${order_name}" -n "${OSAC_NAMESPACE}" -o json 2>/dev/null) || {
+        # Use --ignore-not-found so a transient API error (503, timeout,
+        # token hiccup) retries on the next poll instead of permanently
+        # marking the namespace as seen.
+        if ! order_json=$(oc get clusterorder "${order_name}" -n "${OSAC_NAMESPACE}" \
+            --ignore-not-found -o json 2>/dev/null); then
+            # Transient API error — retry on the next poll.
+            continue
+        fi
+        if [[ -z "${order_json}" ]]; then
             echo "==> ClusterOrder ${order_name} is gone; skipping namespace ${namespace}"
             seen_namespaces["${namespace}"]=1
             continue
-        }
+        fi
         deleting=$(jq -r '.metadata.deletionTimestamp // ""' <<< "${order_json}")
         state=$(jq -r '.status.state // .status.phase // ""' <<< "${order_json}")
         if [[ -n "${deleting}" || "${state}" =~ [Dd][Ee][Ll][Ee][Tt] ]]; then

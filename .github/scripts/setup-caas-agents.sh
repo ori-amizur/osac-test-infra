@@ -301,20 +301,28 @@ info "VMs created: ${VM_NAMES[*]}"
 
 EXPECTED_AGENTS=${AGENT_HOST_COUNT}
 
-info "Waiting for ${EXPECTED_AGENTS} agents to register (this may take 5-10 minutes)..."
+info "Waiting for ${EXPECTED_AGENTS} agents with inventory to register (this may take 5-10 minutes)..."
 elapsed=0
 while true; do
     stop_if_namespace_terminating
-    count=$(oc get agent -n "${AGENT_NAMESPACE}" --no-headers 2>/dev/null | wc -l)
+    # Count only agents whose inventory annotation includes a MAC
+    # address. The assisted controller creates the Agent CR when the
+    # host registers, but adds the inventory annotation later. Counting
+    # CRs without checking for inventory causes a race: the MAC map
+    # builder below reads inventory that has not arrived yet.
+    count=$(oc get agent -n "${AGENT_NAMESPACE}" -o json 2>/dev/null \
+        | jq '[.items[]
+            | (.metadata.annotations["agent.agent-install.openshift.io/inventory"] // "")
+            | fromjson? | .interfaces[0].mac_address // empty] | length' 2>/dev/null || echo 0)
     [[ "${count}" -ge "${EXPECTED_AGENTS}" ]] && break
     sleep 30; elapsed=$((elapsed + 30))
-    echo "  ${elapsed}s elapsed — ${count}/${EXPECTED_AGENTS} agents registered"
+    echo "  ${elapsed}s elapsed — ${count}/${EXPECTED_AGENTS} agents with inventory"
     if [[ "${elapsed}" -ge 900 ]]; then
-        echo "ERROR: Timed out waiting for agents after ${elapsed}s (${count}/${EXPECTED_AGENTS} registered)" >&2
+        echo "ERROR: Timed out waiting for agents after ${elapsed}s (${count}/${EXPECTED_AGENTS} with inventory)" >&2
         exit 1
     fi
 done
-info "All ${EXPECTED_AGENTS} agents registered"
+info "All ${EXPECTED_AGENTS} agents registered with inventory"
 
 if should_approve_agents; then
     info "Approving, labeling, and annotating agents..."
@@ -327,8 +335,13 @@ import json, sys
 data = json.load(sys.stdin)
 for agent in data['items']:
     name = agent['metadata']['name']
-    inv = json.loads(agent['metadata']['annotations']['agent.agent-install.openshift.io/inventory'])
-    mac = inv['interfaces'][0]['mac_address']
+    raw = agent['metadata'].get('annotations', {}).get('agent.agent-install.openshift.io/inventory')
+    if not raw:
+        continue
+    ifaces = json.loads(raw).get('interfaces') or []
+    if not ifaces:
+        continue
+    mac = ifaces[0]['mac_address']
     print(f'{name} {mac}')
 ")
 

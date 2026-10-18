@@ -907,7 +907,7 @@ jobs:
           if kill -0 "$AGENT_WATCHER_PID" 2>/dev/null; then
             echo "Stopping agent watcher (PID $AGENT_WATCHER_PID)..."
             kill -TERM "$AGENT_WATCHER_PID" 2>/dev/null || true
-            for attempt in $(seq 1 30); do
+            for _ in $(seq 1 30); do
               kill -0 "$AGENT_WATCHER_PID" 2>/dev/null || break
               sleep 1
             done
@@ -917,9 +917,18 @@ jobs:
             fi
           fi
 
+          # Redact internal API/apps hostnames and IPs from published
+          # logs — this repo is public and CI output is visible to anyone.
+          redact_hostnames() {
+            sed -E \
+              -e 's/api(-int)?\.[A-Za-z0-9._-]+/api.REDACTED/g' \
+              -e 's/[a-z0-9-]+\.apps\.[A-Za-z0-9._-]+/REDACTED.apps.REDACTED/g' \
+              -e 's/[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/x.x.x.x/g'
+          }
+
           echo "::group::Agent watcher log"
           if [[ -f "$AGENT_WATCHER_LOG" ]]; then
-            cat "$AGENT_WATCHER_LOG"
+            redact_hostnames < "$AGENT_WATCHER_LOG"
           else
             echo "No agent watcher log file found."
           fi
@@ -928,7 +937,7 @@ jobs:
           shopt -s nullglob
           for order_log in "$AGENT_WATCHER_ORDER_LOG_DIR"/*.log; do
             echo "::group::Agent setup log: $(basename "$order_log")"
-            cat "$order_log"
+            redact_hostnames < "$order_log"
             echo "::endgroup::"
           done
 

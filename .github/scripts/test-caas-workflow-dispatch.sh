@@ -129,6 +129,66 @@ assert_contains "Regression checks watcher status" \
     "${REGRESSION_WF}" 'WATCHER_RESULT.*complete'
 
 echo ""
+echo "── Agent inventory/MAC readiness race (review fix) ───────────"
+assert_contains "Wait loop counts agents with inventory annotation" \
+    "${SETUP}" 'agent\.agent-install\.openshift\.io/inventory'
+assert_contains "Wait loop uses jq to count MACs" \
+    "${SETUP}" 'fromjson.*interfaces.*mac_address.*length'
+assert_contains "MAC parser uses .get() for safe annotation access" \
+    "${SETUP}" "\.get.*annotations.*\.get.*agent\.agent-install"
+assert_not_contains "MAC parser does not use direct dict access for inventory" \
+    "${SETUP}" "annotations\['agent\.agent-install\.openshift\.io/inventory'\]"
+
+echo ""
+echo "── Optional jq iteration for missing inventory (review fix) ──"
+assert_contains "Watcher uses optional iteration for items" \
+    "${WATCHER}" '\.items\[\]\?\.status\.inventory'
+assert_contains "Watcher uses optional iteration for interfaces" \
+    "${WATCHER}" '\.interfaces\[\]\?\.ipV4Addresses'
+
+echo ""
+echo "── Distinguish transient API errors from NotFound (review fix) "
+# --ignore-not-found can be on a continuation line, so check it exists
+# in the watcher discovery section (near "Do not start VMs").
+assert_contains "Watcher discovery block uses --ignore-not-found" \
+    "${WATCHER}" 'ignore-not-found -o json'
+assert_contains "Transient API error retries on next poll" \
+    "${WATCHER}" 'Transient API error.*retry'
+assert_not_contains "No unconditional seen_namespaces on oc failure" \
+    "${WATCHER}" 'oc get clusterorder.*-o json 2>/dev/null\) \|\|'
+
+echo ""
+echo "── Unused variable fix SC2034 (review fix) ───────────────────"
+assert_not_contains "No unused attempt variable in watcher stop loop" \
+    "${WF}" 'for attempt in.*seq 1 30'
+assert_contains "Uses _ for unused loop variable" \
+    "${WF}" 'for _ in.*seq 1 30'
+
+echo ""
+echo "── DNS_CLASS indentation under config (review fix) ───────────"
+OVERLAY="infra/agentless-net/values-overlay.yaml"
+# DNS_CLASS must be at 8-space indentation (inside config), not 4-space
+assert_contains "DNS_CLASS is at config level (8-space indent)" \
+    "${OVERLAY}" '^        DNS_CLASS:'
+assert_not_contains "DNS_CLASS is NOT at instanceGroups level (4-space)" \
+    "${OVERLAY}" '^    DNS_CLASS:'
+
+echo ""
+echo "── NTP variable guarded (review fix) ─────────────────────────"
+DEPLOY_OSAC="infra/agentless-net/scripts/deploy-osac.sh"
+assert_not_contains "NTP env var is not set unconditionally" \
+    "${DEPLOY_OSAC}" '^KUBECONFIG.*oc set env.*OSAC_BARE_METAL_WORKER_ADDITIONAL_NTP_SOURCES'
+
+echo ""
+echo "── Internal hostname redaction in published logs (review fix) ─"
+assert_not_contains "Watcher DNS log does not expose API hostname" \
+    "${WATCHER}" 'echo.*Added local DNS entry.*api_host'
+assert_not_contains "Watcher DNS log does not expose apps hostname" \
+    "${WATCHER}" 'echo.*Added local DNS entry.*apps_host'
+assert_contains "Workflow redacts hostnames from published watcher logs" \
+    "${WF}" 'redact_hostnames'
+
+echo ""
 echo "── Summary ────────────────────────────────────────────────────"
 echo "  ${PASS} passed, ${FAIL} failed"
 if [[ "${FAIL}" -gt 0 ]]; then
