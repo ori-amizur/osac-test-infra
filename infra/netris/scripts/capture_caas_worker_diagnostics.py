@@ -753,6 +753,7 @@ def virtual_media_monitor(
 
 def start_virtual_media_monitor(
     output_dir: Path,
+    namespace: str,
     agent_namespace: str,
     bmh_namespace: str,
     patterns: list[str],
@@ -776,6 +777,8 @@ def start_virtual_media_monitor(
         "monitor",
         "--output-dir",
         str(output_dir),
+        "--namespace",
+        namespace,
         "--agent-namespace",
         agent_namespace,
         "--bmh-namespace",
@@ -1310,7 +1313,7 @@ def main() -> int:
         start_packet_capture(args.output_dir, patterns, args.management_bridge, args.bmc_network)
         if args.eject_virtual_media == "true":
             monitor_status = start_virtual_media_monitor(
-                args.output_dir, args.agent_namespace, args.bmh_namespace, patterns
+                args.output_dir, args.namespace, args.agent_namespace, args.bmh_namespace, patterns
             )
             write_json(
                 args.output_dir / "virtual-media" / "eject-start.json",
