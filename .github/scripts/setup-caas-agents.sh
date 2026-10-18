@@ -5,8 +5,8 @@
 #
 # This is the cluster-tool counterpart of
 # infra/agentless-net/scripts/setup-caas.sh — same agent registration
-# flow (register host type → create InfraEnv → boot VMs from discovery
-# ISO → wait for agents → label/approve), adapted to run on the
+# flow (create an InfraEnv → boot VMs from discovery ISO → wait for
+# agents → label/approve), adapted to run on the
 # cluster-tool libvirt network instead of containerlab bridges.
 #
 # The VM creation pattern follows .github/scripts/setup-virtual-bmh.sh,
@@ -15,7 +15,7 @@
 # Agent flow modes (CAAS_AGENT_FLOW, default: hot-pool):
 #   hot-pool          — legacy: agents in hardware-inventory, this script
 #                       labels AND approves them.
-#   cluster-namespace — Option C: agents in the ClusterOrder namespace
+#   cluster-namespace — agents in the ClusterOrder namespace
 #                       (CAAS_CLUSTER_ORDER_NAMESPACE). This script labels
 #                       but does NOT approve — osac ci_create owns approval.
 #
@@ -26,6 +26,7 @@
 # Optional env:
 #   CAAS_AGENT_FLOW              — "hot-pool" (default) or "cluster-namespace"
 #   CAAS_CLUSTER_ORDER_NAMESPACE — required when CAAS_AGENT_FLOW=cluster-namespace
+#   CAAS_CLUSTER_ORDER_NAME      — parent ClusterOrder to monitor for deletion
 #   OSAC_NAMESPACE               — OSAC deployment namespace (default: osac-e2e-ci)
 #   OSAC_PULL_SECRET_PATH        — path to pull-secret JSON (default: $RUNNER_TEMP/pull-secret.json)
 #   AGENT_HOST_COUNT             — number of agent VMs to create (default: 2)
@@ -48,12 +49,11 @@ OSAC_NAMESPACE="${OSAC_NAMESPACE:-osac-e2e-ci}"
 PULL_SECRET="${OSAC_PULL_SECRET_PATH:-${RUNNER_TEMP:-/tmp}/pull-secret.json}"
 AGENT_HOST_COUNT="${AGENT_HOST_COUNT:-2}"
 AGENT_RESOURCE_CLASS="${AGENT_RESOURCE_CLASS:-ci-worker}"
+CAAS_CLUSTER_ORDER_NAME="${CAAS_CLUSTER_ORDER_NAME:-}"
 INFRAENV_NAME="infraenv"
 
 VIRSH="virsh -c qemu:///system"
 CT_NETWORK="test-infra-net-${CLONE_NAME}"
-VM_PREFIX="caas-agent-${CLONE_NAME}"
-VM_DISK_DIR="/tmp/caas-agent-disks-${CLONE_NAME}"
 VM_VCPUS=4
 VM_MEMORY=16384
 VM_DISK_SIZE=120  # GB — Assisted needs ≥100 GB
@@ -63,60 +63,102 @@ if ! validate_agent_flow; then
     exit 1
 fi
 
-SSH_PUB_KEY="$(cat ~/.ssh/id_rsa.pub 2>/dev/null || cat ~/.ssh/id_ed25519.pub 2>/dev/null || true)"
-
 # Resolve target namespace based on agent flow mode.
-# In cluster-namespace mode without CAAS_CLUSTER_ORDER_NAMESPACE, only
-# register the host type (pre-order phase) — the full agent setup runs
-# later after ClusterOrder creation provides the namespace.
 if [[ "${CAAS_AGENT_FLOW}" == "cluster-namespace" ]]; then
     info() { echo "==> [cluster-namespace] $*"; }
     if [[ -z "${CAAS_CLUSTER_ORDER_NAMESPACE:-}" ]]; then
-        AGENT_NAMESPACE=""
-    else
-        AGENT_NAMESPACE="${CAAS_CLUSTER_ORDER_NAMESPACE}"
+        info "No ClusterOrder namespace yet; skipping pre-order agent setup."
+        exit 0
     fi
+    AGENT_NAMESPACE="${CAAS_CLUSTER_ORDER_NAMESPACE}"
 else
     AGENT_NAMESPACE="hardware-inventory"
     info() { echo "==> $*"; }
 fi
 
-# ---------- step 1: register host type ----------
+# ClusterOrder-scoped agent VMs share the ClusterOrder namespace, but
+# pytest-xdist can create multiple orders concurrently. Keep VM names,
+# storage, and MAC addresses unique per order.
+VM_IDENTITY="${CAAS_CLUSTER_ORDER_NAME:-${AGENT_NAMESPACE}}"
+NAMESPACE_HASH="$(printf '%s' "${VM_IDENTITY}" | sha256sum | cut -c1-8)"
+VM_PREFIX="caas-agent-${CLONE_NAME}-${NAMESPACE_HASH}"
+VM_DISK_DIR="/tmp/caas-agent-disks-${CLONE_NAME}/${NAMESPACE_HASH}"
+SSH_PUB_KEY="$(cat ~/.ssh/id_rsa.pub 2>/dev/null || cat ~/.ssh/id_ed25519.pub 2>/dev/null || true)"
+VM_NAMES=()
+SETUP_COMPLETED=0
 
-INTERNAL_API="https://$(oc get route fulfillment-internal-api -n "${OSAC_NAMESPACE}" -o jsonpath='{.status.ingress[0].host}')"
-TOKEN=$(oc create token -n "${OSAC_NAMESPACE}" admin)
+order_is_terminating() {
+    [[ -n "${CAAS_CLUSTER_ORDER_NAME}" ]] || return 1
 
-RESPONSE_BODY=$(mktemp)
-HTTP_CODE=$(curl -sk -w "%{http_code}" -X POST "${INTERNAL_API}/api/private/v1/host_types" \
-    -H "Authorization: Bearer ${TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "{\"id\": \"${AGENT_RESOURCE_CLASS}\", \"title\": \"CI Worker\", \"description\": \"Worker nodes for CI testing\"}" \
-    -o "${RESPONSE_BODY}") || true
-if [[ "${HTTP_CODE}" == "200" || "${HTTP_CODE}" == "201" ]]; then
-    info "Host type '${AGENT_RESOURCE_CLASS}' created"
-elif [[ "${HTTP_CODE}" == "409" ]]; then
-    info "Host type '${AGENT_RESOURCE_CLASS}' already exists — skipping"
+    local order_json deletion_timestamp state
+    if ! order_json=$(oc get clusterorder "${CAAS_CLUSTER_ORDER_NAME}" \
+        -n "${OSAC_NAMESPACE}" --ignore-not-found -o json 2>/dev/null); then
+        return 1
+    fi
+    [[ -n "${order_json}" ]] || return 0
+
+    deletion_timestamp=$(jq -r '.metadata.deletionTimestamp // ""' <<< "${order_json}")
+    state=$(jq -r '.status.state // .status.phase // ""' <<< "${order_json}")
+    [[ -n "${deletion_timestamp}" || "${state}" =~ [Dd][Ee][Ll][Ee][Tt] ]]
+}
+
+namespace_is_terminating() {
+    local namespace_json deletion_timestamp
+    order_is_terminating && return 0
+    if ! namespace_json=$(oc get namespace "${AGENT_NAMESPACE}" --ignore-not-found -o json 2>/dev/null); then
+        return 1
+    fi
+    [[ -n "${namespace_json}" ]] || return 0
+    deletion_timestamp=$(jq -r '.metadata.deletionTimestamp // ""' <<< "${namespace_json}")
+    [[ -n "${deletion_timestamp}" ]]
+}
+
+cleanup_incomplete_agent_vms() {
+    local rc=$? vm_name
+    trap - EXIT
+
+    if [[ "${CAAS_AGENT_FLOW}" == "cluster-namespace" && "${SETUP_COMPLETED}" -ne 1 ]]; then
+        info "Agent setup ended before completion; removing per-order VMs and disks..."
+        for vm_name in "${VM_NAMES[@]}"; do
+            ${VIRSH} destroy "${vm_name}" >/dev/null 2>&1 || true
+            ${VIRSH} undefine "${vm_name}" --nvram >/dev/null 2>&1 || true
+        done
+        rm -rf "${VM_DISK_DIR}"
+    fi
+
+    exit "${rc}"
+}
+
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap cleanup_incomplete_agent_vms EXIT
+
+if [[ "${CAAS_AGENT_FLOW}" == "cluster-namespace" ]]; then
+    if ! namespace_json=$(oc get namespace "${AGENT_NAMESPACE}" --ignore-not-found -o json 2>/dev/null); then
+        echo "ERROR: Could not check ClusterOrder namespace ${AGENT_NAMESPACE}." >&2
+        exit 1
+    fi
+    if [[ -z "${namespace_json}" ]]; then
+        info "ClusterOrder namespace ${AGENT_NAMESPACE} has already been removed; skipping agent setup."
+        exit 0
+    fi
+    if namespace_is_terminating; then
+        info "ClusterOrder namespace ${AGENT_NAMESPACE} is terminating; skipping agent setup."
+        exit 0
+    fi
 else
-    echo "ERROR: Failed to create host type (HTTP ${HTTP_CODE})" >&2
-    cat "${RESPONSE_BODY}" >&2
-    rm -f "${RESPONSE_BODY}"
-    exit 1
-fi
-rm -f "${RESPONSE_BODY}"
-
-# In cluster-namespace mode without a namespace, host-type registration
-# is all we can do before the ClusterOrder exists.  Exit cleanly so the
-# workflow can create the order, discover the namespace, then re-run
-# this script with CAAS_CLUSTER_ORDER_NAMESPACE set.
-if [[ "${CAAS_AGENT_FLOW}" == "cluster-namespace" ]] && [[ -z "${AGENT_NAMESPACE}" ]]; then
-    info "Pre-order phase complete. Re-run with CAAS_CLUSTER_ORDER_NAMESPACE after ClusterOrder creation."
-    exit 0
+    info "Creating agent namespace '${AGENT_NAMESPACE}'..."
+    oc create namespace "${AGENT_NAMESPACE}" --dry-run=client -o yaml | oc apply -f -
 fi
 
-# ---------- step 2: create agent namespace and InfraEnv ----------
+stop_if_namespace_terminating() {
+    if namespace_is_terminating; then
+        info "ClusterOrder namespace ${AGENT_NAMESPACE} is terminating; ending agent setup."
+        exit 0
+    fi
+}
 
-info "Creating agent namespace '${AGENT_NAMESPACE}'..."
-oc create namespace "${AGENT_NAMESPACE}" --dry-run=client -o yaml | oc apply -f -
+# ---------- create the agent namespace resources and InfraEnv ----------
 
 info "Creating pull-secret in ${AGENT_NAMESPACE}..."
 oc create secret generic pull-secret \
@@ -154,6 +196,7 @@ EOF
 info "Waiting for discovery ISO URL..."
 elapsed=0
 while true; do
+    stop_if_namespace_terminating
     ISO_URL=$(oc get infraenv "${INFRAENV_NAME}" -n "${AGENT_NAMESPACE}" \
         -o jsonpath='{.status.isoDownloadURL}' 2>/dev/null) || true
     [[ -n "${ISO_URL}" ]] && break
@@ -186,16 +229,16 @@ OVMF_CODE="/usr/share/OVMF/OVMF_CODE.secboot.fd"
 OVMF_VARS="/usr/share/OVMF/OVMF_VARS.fd"
 
 info "Creating ${AGENT_HOST_COUNT} agent VMs on network ${CT_NETWORK}..."
-VM_NAMES=()
 for i in $(seq 1 "${AGENT_HOST_COUNT}"); do
+    stop_if_namespace_terminating
     VM_NAME="${VM_PREFIX}-${i}"
-    MAC="52:54:00:ca:a5:$(printf '%02x' "${i}")"
+    MAC="52:54:${NAMESPACE_HASH:0:2}:${NAMESPACE_HASH:2:2}:${NAMESPACE_HASH:4:2}:$(printf '%02x' "${i}")"
     DISK_PATH="${VM_DISK_DIR}/${VM_NAME}.qcow2"
     VARS_PATH="${VM_DISK_DIR}/${VM_NAME}-VARS.fd"
+    VM_NAMES+=("${VM_NAME}")
 
     if ${VIRSH} domstate "${VM_NAME}" 2>/dev/null | grep -q "running"; then
         echo "  VM ${VM_NAME} already running — skipping"
-        VM_NAMES+=("${VM_NAME}")
         continue
     fi
 
@@ -244,7 +287,6 @@ for i in $(seq 1 "${AGENT_HOST_COUNT}"); do
 VMXML
 
     ${VIRSH} start "${VM_NAME}"
-    VM_NAMES+=("${VM_NAME}")
     echo "  Started VM ${VM_NAME}: ${VM_VCPUS} vCPU, ${VM_MEMORY}MB RAM, ${VM_DISK_SIZE}GB disk"
 done
 
@@ -257,6 +299,7 @@ EXPECTED_AGENTS=${AGENT_HOST_COUNT}
 info "Waiting for ${EXPECTED_AGENTS} agents to register (this may take 5-10 minutes)..."
 elapsed=0
 while true; do
+    stop_if_namespace_terminating
     count=$(oc get agent -n "${AGENT_NAMESPACE}" --no-headers 2>/dev/null | wc -l)
     [[ "${count}" -ge "${EXPECTED_AGENTS}" ]] && break
     sleep 30; elapsed=$((elapsed + 30))
@@ -286,6 +329,7 @@ for agent in data['items']:
 
 ANNOTATED_COUNT=0
 for agent in $(oc get agent -n "${AGENT_NAMESPACE}" -o jsonpath='{.items[*].metadata.name}'); do
+    stop_if_namespace_terminating
     if should_approve_agents; then
         oc patch agent/"${agent}" -n "${AGENT_NAMESPACE}" --type=merge \
             -p '{"spec":{"approved":true}}'
@@ -316,3 +360,4 @@ if [[ "${ANNOTATED_COUNT}" -ne "${EXPECTED_AGENTS}" ]]; then
 fi
 
 info "setup-caas-agents complete (agent_flow=${CAAS_AGENT_FLOW})."
+SETUP_COMPLETED=1

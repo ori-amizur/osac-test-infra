@@ -91,6 +91,11 @@ else
             VALUES_FILE=values/agentless-net-ci/values.yaml)
 fi
 
+info "Configuring the cluster-tool gateway as the worker NTP source..."
+KUBECONFIG="$KUBECONFIG" oc set env deploy/osac-operator -n "$OSAC_NAMESPACE" \
+    OSAC_BARE_METAL_WORKER_ADDITIONAL_NTP_SOURCES="${MGMT_GW}"
+KUBECONFIG="$KUBECONFIG" oc rollout status deploy/osac-operator -n "$OSAC_NAMESPACE" --timeout=300s
+
 # ---------- step 9: patch DNS credentials ----------
 
 if [ -f "$DNS_CREDS" ]; then

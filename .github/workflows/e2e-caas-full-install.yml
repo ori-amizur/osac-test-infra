@@ -576,7 +576,7 @@ jobs:
       # Same shared setup e2e-bmaas-full-install uses: applies the cluster-
       # scoped Provisioning CR (watchAllNamespaces) the osac chart's
       # pre-install hook (OSAC-4140) requires, starts sushy-tools, and
-      # creates BareMetalHosts labeled osac.openshift.io/host-type=default
+      # creates BareMetalHosts labeled osac.openshift.io/resource_class=ci-worker
       # that the caas e2e baremetal worker tests allocate. Gated on the value
       # above so non-metal3 CaaS runs are unaffected. teardown.sh removes the
       # VMs, storage pool, and sushy-emulator by CLONE_NAME.
@@ -586,9 +586,10 @@ jobs:
           KUBECONFIG: ${{ runner.temp }}/kubeconfig
           # Must match bmf.metal3.namespace in the caas-ci values / install args.
           BMH_NAMESPACE: host-inventory
+          BMH_RESOURCE_CLASS: ci-worker
           # Peak concurrent demand: test_cluster_create_with_two_node_sets
           # holds two hosts (compute + gpu instance types, both selecting
-          # host-type=default) while test_worker_tenant_status holds one on a
+          # resource_class=ci-worker) while test_worker_tenant_status holds one on a
           # different xdist worker (pytest -n 4 --dist loadfile).
           BMH_COUNT: "3"
         run: bash .github/scripts/setup-virtual-bmh.sh
@@ -683,13 +684,17 @@ jobs:
             helm dependency update charts/osac/
           fi
 
+          if [[ -n "${VIRTUAL_BMH_GATEWAY:-}" ]]; then
+            SET_ARGS+=("--set-string" "operator.bareMetalWorker.additionalNTPSources[0]=${VIRTUAL_BMH_GATEWAY}")
+          fi
+
           make install-osac AAP_LICENSE_FILE="${AAP_LICENSE_FILE}" PLATFORM=openshift PROFILE=caas-ci NS="${INSTALLER_NAMESPACE}" EXTRA_HELM_ARGS="${SET_ARGS[*]}"
 
           # helm --wait only confirms the *new* pod/ReplicaSet is Ready -- it
           # does not wait for the old pod to finish terminating or for the
           # Service/route's endpoint list to fully converge, so a caller
-          # right after this (e.g. setup-caas-agents.sh registering the
-          # ci-worker host type) can race a stale or not-yet-routable
+          # right after this (e.g. setup-caas-agents.sh preparing the
+          # ci-worker agent inventory) can race a stale or not-yet-routable
           # backend and get a transient 503 from the gateway. Same fix as
           # e2e-vmaas-full-install.yml's equivalent step (OSAC-2528) --
           # confirm every Deployment has actually finished rolling out,
@@ -729,6 +734,7 @@ jobs:
           # Configure CaaS domain (after image overrides so helm upgrade cannot overwrite)
           oc patch configmap cluster-fulfillment-ig -n "${INSTALLER_NAMESPACE}" --type=merge \
             -p "{\"data\":{
+                \"DNS_CLASS\":\"dns.route53.dns\",
                 \"DNS_ZONE\":\"${CAAS_DOMAIN}\",
                 \"EXTERNAL_ACCESS_BASE_DOMAIN\":\"${CAAS_DOMAIN}\",
                 \"EXTERNAL_ACCESS_SUPPORTED_BASE_DOMAINS\":\"${CAAS_DOMAIN}\",
@@ -756,64 +762,36 @@ jobs:
             exit 0
           fi
 
-          # cluster-namespace flow: boot agent VMs from the discovery ISO
-          # on the cluster-tool libvirt network.  Pre-order phase registers
-          # the host type only; the full agent boot happens after the
-          # ClusterOrder namespace is discovered (see the "Boot agents in
-          # ClusterOrder namespace" step below).
+          # cluster-namespace flow: this pre-order invocation exits without
+          # setup; the watcher sets CAAS_CLUSTER_ORDER_NAMESPACE and invokes
+          # bash .github/scripts/setup-caas-agents.sh for each active order.
           bash .github/scripts/setup-caas-agents.sh
 
-      # cluster-namespace flow, second phase: start a background watcher
-      # that polls for a ClusterOrder namespace (created by the E2E test
-      # inside the container) and boots agent VMs from the discovery ISO
-      # as soon as the namespace appears.  The watcher runs on the HOST
-      # while the E2E tests run in their container — the tests create the
-      # ClusterOrder via the gRPC API, the controller creates the
-      # namespace, the watcher detects it and boots the agents, and the
-      # tests wait for the cluster to reach READY.  This mirrors the
-      # agentless-net test-e2e.sh flow (lines 97-122) adapted for the
-      # split host/container execution model.
-      - name: Start agent watcher for ClusterOrder namespace
-        if: inputs.caas-agent-flow == 'cluster-namespace'
+      # Watch every active order namespace because pytest-xdist can create
+      # multiple ClusterOrders concurrently. Each order gets separate agent
+      # VMs, disks, and MAC addresses.
+      - name: Start CaaS agent and virtual BMH watcher
+        if: inputs.caas-agent-flow == 'cluster-namespace' || steps.install-infra.outputs.metal3-enabled == 'true'
         env:
           KUBECONFIG: ${{ runner.temp }}/kubeconfig
           OSAC_NAMESPACE: ${{ inputs.namespace }}
           CAAS_AGENT_FLOW: cluster-namespace
+          CAAS_AGENT_WATCHER_SETUP_ENABLED: ${{ inputs.caas-agent-flow == 'cluster-namespace' }}
           OSAC_PULL_SECRET_PATH: ${{ runner.temp }}/pull-secret.json
         run: |
-          WATCHER_LOG="${RUNNER_TEMP}/agent-watcher.log"
-          nohup bash -c '
-            set -euo pipefail
-            echo "==> Agent watcher started, polling for ClusterOrder namespace..."
-            elapsed=0
-            CLUSTER_ORDER_NS=""
-            while true; do
-                # Look for any namespace labelled with a ClusterOrder name.
-                CLUSTER_ORDER_NS=$(oc get ns \
-                    -l "osac.openshift.io/clusterorder" \
-                    --no-headers 2>/dev/null \
-                    | awk "{print \$1}" | head -1) || true
-                [[ -n "${CLUSTER_ORDER_NS}" ]] && break
-                sleep 10; elapsed=$((elapsed + 10))
-                if [[ "${elapsed}" -ge 1200 ]]; then
-                    echo "WARNING: Agent watcher timed out after ${elapsed}s without finding a ClusterOrder namespace"
-                    exit 0
-                fi
-                echo "  ${elapsed}s elapsed — waiting for ClusterOrder namespace..."
-            done
-            echo "==> ClusterOrder namespace discovered: ${CLUSTER_ORDER_NS}"
-
-            echo "==> Booting agents in ClusterOrder namespace..."
-            CAAS_AGENT_FLOW="cluster-namespace" \
-            CAAS_CLUSTER_ORDER_NAMESPACE="${CLUSTER_ORDER_NS}" \
-                bash .github/scripts/setup-caas-agents.sh
-            echo "==> Agent watcher: agent boot complete"
-          ' > "${WATCHER_LOG}" 2>&1 &
+          WATCHER_LOG="$RUNNER_TEMP/agent-watcher.log"
+          WATCHER_STATUS="$RUNNER_TEMP/agent-watcher.status"
+          ORDER_LOG_DIR="$RUNNER_TEMP/agent-order-logs"
+          export CAAS_AGENT_WATCHER_STATUS_FILE="$WATCHER_STATUS"
+          export CAAS_AGENT_WATCHER_ORDER_LOG_DIR="$ORDER_LOG_DIR"
+          echo "AGENT_WATCHER_STATUS_FILE=$WATCHER_STATUS" >> "$GITHUB_ENV"
+          echo "AGENT_WATCHER_ORDER_LOG_DIR=$ORDER_LOG_DIR" >> "$GITHUB_ENV"
+          nohup bash .github/scripts/watch-caas-agent-namespaces.sh > "$WATCHER_LOG" 2>&1 &
 
           WATCHER_PID=$!
-          echo "AGENT_WATCHER_PID=${WATCHER_PID}" >> "$GITHUB_ENV"
-          echo "AGENT_WATCHER_LOG=${WATCHER_LOG}" >> "$GITHUB_ENV"
-          echo "Agent watcher started (PID ${WATCHER_PID}), log: ${WATCHER_LOG}"
+          echo "AGENT_WATCHER_PID=$WATCHER_PID" >> "$GITHUB_ENV"
+          echo "AGENT_WATCHER_LOG=$WATCHER_LOG" >> "$GITHUB_ENV"
+          echo "Agent watcher started (PID $WATCHER_PID), log: $WATCHER_LOG"
 
       - name: Create test adapter route for metering tests
         id: metering-adapter
@@ -923,18 +901,45 @@ jobs:
       - name: Collect agent watcher results
         if: always() && env.AGENT_WATCHER_PID != ''
         run: |
+          # Stop the watcher after pytest has finished. Its TERM handler
+          # stops any remaining per-order bootstrap processes and records
+          # whether agent setup failed.
+          if kill -0 "$AGENT_WATCHER_PID" 2>/dev/null; then
+            echo "Stopping agent watcher (PID $AGENT_WATCHER_PID)..."
+            kill -TERM "$AGENT_WATCHER_PID" 2>/dev/null || true
+            for attempt in $(seq 1 30); do
+              kill -0 "$AGENT_WATCHER_PID" 2>/dev/null || break
+              sleep 1
+            done
+            if kill -0 "$AGENT_WATCHER_PID" 2>/dev/null; then
+              echo "::error::Agent watcher did not stop after 30 seconds"
+              kill -KILL "$AGENT_WATCHER_PID" 2>/dev/null || true
+            fi
+          fi
+
           echo "::group::Agent watcher log"
-          if [[ -f "${AGENT_WATCHER_LOG}" ]]; then
-            cat "${AGENT_WATCHER_LOG}"
+          if [[ -f "$AGENT_WATCHER_LOG" ]]; then
+            cat "$AGENT_WATCHER_LOG"
           else
             echo "No agent watcher log file found."
           fi
           echo "::endgroup::"
-          # If the watcher is still running (test timed out before agents
-          # registered), kill it to avoid leaking the process.
-          if kill -0 "${AGENT_WATCHER_PID}" 2>/dev/null; then
-            echo "Stopping agent watcher (PID ${AGENT_WATCHER_PID})..."
-            kill "${AGENT_WATCHER_PID}" 2>/dev/null || true
+
+          shopt -s nullglob
+          for order_log in "$AGENT_WATCHER_ORDER_LOG_DIR"/*.log; do
+            echo "::group::Agent setup log: $(basename "$order_log")"
+            cat "$order_log"
+            echo "::endgroup::"
+          done
+
+          if [[ ! -f "$AGENT_WATCHER_STATUS_FILE" ]]; then
+            echo "::error::Agent watcher did not write a final status"
+            exit 1
+          fi
+          WATCHER_STATUS=$(cat "$AGENT_WATCHER_STATUS_FILE")
+          if [[ "$WATCHER_STATUS" != "complete" ]]; then
+            echo "::error::CaaS agent setup status was $WATCHER_STATUS"
+            exit 1
           fi
 
       - name: Gather artifacts

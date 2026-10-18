@@ -11,9 +11,10 @@
 #   KUBECONFIG   — path to the cluster kubeconfig
 #
 # Optional env:
-#   BMH_NAMESPACE  — namespace for BMH resources (default: host-inventory)
-#   BMH_COUNT      — number of virtual BMHs to create (default: 2)
-#   SUSHY_PORT     — sushy-tools listen port (default: 8000)
+#   BMH_NAMESPACE       — namespace for BMH resources (default: host-inventory)
+#   BMH_COUNT           — number of virtual BMHs to create (default: 2)
+#   BMH_RESOURCE_CLASS  — resource class label (default: ci-worker)
+#   SUSHY_PORT          — sushy-tools listen port (default: 8000)
 #
 # Teardown derives all paths from CLONE_NAME — no GITHUB_ENV exports needed.
 set -euo pipefail
@@ -23,6 +24,7 @@ set -euo pipefail
 
 BMH_NAMESPACE="${BMH_NAMESPACE:-host-inventory}"
 BMH_COUNT="${BMH_COUNT:-2}"
+BMH_RESOURCE_CLASS="${BMH_RESOURCE_CLASS:-ci-worker}"
 SUSHY_PORT="${SUSHY_PORT:-8000}"
 SUSHY_CONFIG_DIR="${HOME}/sushy-${CLONE_NAME}"
 SUSHY_PID_FILE="${SUSHY_CONFIG_DIR}/sushy.pid"
@@ -68,6 +70,9 @@ root = ET.parse(sys.stdin).getroot()
 print(root.find('.//ip').get('address'))
 ")
 echo "Gateway IP (host): ${GW_IP}"
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+  echo "VIRTUAL_BMH_GATEWAY=${GW_IP}" >> "${GITHUB_ENV}"
+fi
 
 # --- Step 3: Create libvirt storage pool for sushy-tools ---
 echo "==> Creating libvirt storage pool '${POOL_NAME}'..."
@@ -317,7 +322,7 @@ done
 echo "==> Labeling BareMetalHosts..."
 for VM_NAME in ${VM_NAMES}; do
   oc label bmh "${VM_NAME}" -n "${BMH_NAMESPACE}" \
-    osac.openshift.io/host-type=default --overwrite
+    "osac.openshift.io/resource_class=${BMH_RESOURCE_CLASS}" --overwrite
   echo "  Labeled ${VM_NAME}"
 done
 
