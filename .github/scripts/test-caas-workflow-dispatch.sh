@@ -185,8 +185,43 @@ assert_not_contains "Watcher DNS log does not expose API hostname" \
     "${WATCHER}" 'echo.*Added local DNS entry.*api_host'
 assert_not_contains "Watcher DNS log does not expose apps hostname" \
     "${WATCHER}" 'echo.*Added local DNS entry.*apps_host'
-assert_contains "Workflow redacts hostnames from published watcher logs" \
+assert_contains "CaaS workflow redacts hostnames from published watcher logs" \
     "${WF}" 'redact_hostnames'
+REGRESSION_WF=".github/workflows/e2e-full-regression.yml"
+assert_contains "Regression workflow redacts hostnames from published watcher logs" \
+    "${REGRESSION_WF}" 'redact_hostnames'
+assert_not_contains "Regression workflow does not cat raw watcher log" \
+    "${REGRESSION_WF}" 'cat "\$VIRTUAL_BMH_WATCHER_LOG"'
+
+echo ""
+echo "── Redfish curl does not leak internal endpoints (review fix) ─"
+# The Redfish PATCH curl is a multi-line command, so extract the block
+# and check properties within it.
+CURL_BLOCK=$(sed -n '/curl --noproxy/,/; then$/p' "${WATCHER}")
+if [[ -z "${CURL_BLOCK}" ]]; then
+    echo "  FAIL: Redfish curl block not found"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: Redfish curl block found"
+    PASS=$((PASS + 1))
+fi
+# curl must not use --show-error (prints URL on failure to stderr/log)
+if echo "${CURL_BLOCK}" | grep -qF -- '--show-error'; then
+    echo "  FAIL: Redfish curl must not use --show-error"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: Redfish curl does not use --show-error"
+    PASS=$((PASS + 1))
+fi
+# curl stderr must be redirected so failure messages cannot expose
+# the Redfish URL or BMC endpoint in the published watcher log.
+if echo "${CURL_BLOCK}" | grep -qE '2>/dev/null'; then
+    echo "  PASS: Redfish curl stderr is suppressed"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: Redfish curl stderr must be redirected to /dev/null"
+    FAIL=$((FAIL + 1))
+fi
 
 echo ""
 echo "── finish_watcher does not hide incomplete provisioning (review fix) "
@@ -203,6 +238,13 @@ assert_not_contains "finish_watcher does not set cancelled_setups" \
 # or trap).  The pattern checks that cancelled_setups[...]=1 does not
 # appear between "finish_watcher()" and "trap finish_watcher".
 FINISH_BODY=$(sed -n '/^finish_watcher()/,/^trap finish_watcher/p' "${WATCHER}")
+if [[ -z "${FINISH_BODY}" ]]; then
+    echo "  FAIL: finish_watcher body is empty (function not found)"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: finish_watcher body is nonempty"
+    PASS=$((PASS + 1))
+fi
 if echo "${FINISH_BODY}" | grep -qE 'cancelled_setups\[.*\]='; then
     echo "  FAIL: finish_watcher body must not assign to cancelled_setups"
     FAIL=$((FAIL + 1))
@@ -210,9 +252,15 @@ else
     echo "  PASS: finish_watcher body does not assign to cancelled_setups"
     PASS=$((PASS + 1))
 fi
-# Verify that signal_setup is still called for unfinished setups
-assert_contains "finish_watcher still signals unfinished setups" \
-    "${WATCHER}" 'signal_setup'
+# Verify signal_setup is called WITHIN finish_watcher (not just anywhere
+# in the watcher) so removing it from the shutdown path is detected.
+if echo "${FINISH_BODY}" | grep -qE 'signal_setup'; then
+    echo "  PASS: finish_watcher body calls signal_setup"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: finish_watcher body must call signal_setup for unfinished setups"
+    FAIL=$((FAIL + 1))
+fi
 
 echo ""
 echo "── Summary ────────────────────────────────────────────────────"

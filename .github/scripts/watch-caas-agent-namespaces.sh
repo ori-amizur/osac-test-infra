@@ -234,16 +234,20 @@ repair_virtual_bmh_reboot() {
             bmc_host=$(printf '%s\n' "${redfish_url}" | sed -E 's|^https?://||; s|[:/].*||')
             printf 'machine %s login %s password %s\n' \
                 "${bmc_host}" "${bmc_username}" "${bmc_password}" > "${netrc_file}"
-            if curl --noproxy '*' --silent --show-error --fail-with-body \
+            # Suppress curl diagnostics so a failure cannot print the
+            # raw redfish_url or internal BMC endpoint to the watcher
+            # log, which is published in public CI output.  Use --silent
+            # without verbose error flags and redirect stderr to /dev/null.
+            if curl --noproxy '*' --silent --fail-with-body \
                 --connect-timeout 5 --max-time 15 \
                 --netrc-file "${netrc_file}" \
                 -H 'Content-Type: application/json' \
                 -X PATCH "${redfish_url}" \
-                --data '{"Boot":{"BootSourceOverrideTarget":"Hdd"}}' >/dev/null; then
+                --data '{"Boot":{"BootSourceOverrideTarget":"Hdd"}}' >/dev/null 2>/dev/null; then
                 boot_order_patched["${repair_key}"]=1
                 echo "==> Set virtual BMH ${bmh_name} next boot to disk for Agent ${agent_name} reboot"
             else
-                echo "WARNING: Failed to set virtual BMH ${bmh_name} next boot to disk"
+                echo "WARNING: Failed to set virtual BMH ${bmh_name} next boot to disk (Redfish PATCH failed)"
                 rm -f "${netrc_file}"
                 continue
             fi
