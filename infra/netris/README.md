@@ -127,6 +127,11 @@ and passes its ignition as worker BMI user data. Metal3 first boots its IPA
 ramdisk to install the BMI; the lifecycle NIC stays attached for that step.
 The installed worker then boots with the order ignition, and Assisted Service
 creates its Agent in the order namespace.
+When workers boot the order InfraEnv as Metal3 live ISOs, the diagnostics
+helper ejects each virtual-media ISO after its Assisted Agent connects. The
+sushy-tools libvirt BMC applies boot-device overrides continuously; without
+ejection, Assisted's post-install reboot returns to the ISO instead of the
+installed disk.
 For the CI workflow that namespace is `osac-e2e-ci`. The Netris AAP role maps
 those Agents' inventory hostnames to Netris server names using the optional
 `agent_server_name_patterns` in `NETRIS_RESOURCE_CLASS_MAP`, then labels the

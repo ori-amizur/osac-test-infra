@@ -142,6 +142,7 @@ caas_discovery_disk_gb: 100
 caas_discovery_infraenv_name: "infraenv"
 caas_discovery_infraenv_namespace: "hardware-inventory"
 caas_use_order_infraenv_for_worker_boot: true
+caas_eject_worker_virtual_media: true
 
 # Legacy shared-InfraEnv discovery experiments — apply a different config to
 # each discovery VM in a single run, then inspect the per-VM diagnostics.

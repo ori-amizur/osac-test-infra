@@ -39,6 +39,7 @@
           --vm-patterns-json {{ caas_discovery_vm_patterns | to_json | quote }}
           --management-bridge {{ mgmt_bridge_name | default('br-mgmt') | quote }}
           --bmc-network {{ bmc_net_name | default('bmc-net') | quote }}
+          --eject-virtual-media {{ (caas_eject_worker_virtual_media | default(false) | bool) | lower }}
       environment:
         KUBECONFIG: /root/.kube/config
       changed_when: false
