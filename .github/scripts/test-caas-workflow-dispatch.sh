@@ -189,6 +189,32 @@ assert_contains "Workflow redacts hostnames from published watcher logs" \
     "${WF}" 'redact_hostnames'
 
 echo ""
+echo "── finish_watcher does not hide incomplete provisioning (review fix) "
+# finish_watcher must NOT mark unfinished setups as cancelled.  Only
+# cancel_deleting_setups may set cancelled_setups (when the ClusterOrder
+# or namespace is gone/deleting).  If finish_watcher itself sets
+# cancelled_setups, an unfinished setup stopped during normal workflow
+# shutdown would be silently ignored and the watcher would report success
+# even though provisioning was incomplete.
+assert_not_contains "finish_watcher does not set cancelled_setups" \
+    "${WATCHER}" 'finish_watcher\(\).*cancelled_setups\['
+# More specific: check no cancelled_setups assignment inside finish_watcher
+# by scanning the function body (from "finish_watcher()" to next function
+# or trap).  The pattern checks that cancelled_setups[...]=1 does not
+# appear between "finish_watcher()" and "trap finish_watcher".
+FINISH_BODY=$(sed -n '/^finish_watcher()/,/^trap finish_watcher/p' "${WATCHER}")
+if echo "${FINISH_BODY}" | grep -qE 'cancelled_setups\[.*\]='; then
+    echo "  FAIL: finish_watcher body must not assign to cancelled_setups"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: finish_watcher body does not assign to cancelled_setups"
+    PASS=$((PASS + 1))
+fi
+# Verify that signal_setup is still called for unfinished setups
+assert_contains "finish_watcher still signals unfinished setups" \
+    "${WATCHER}" 'signal_setup'
+
+echo ""
 echo "── Summary ────────────────────────────────────────────────────"
 echo "  ${PASS} passed, ${FAIL} failed"
 if [[ "${FAIL}" -gt 0 ]]; then

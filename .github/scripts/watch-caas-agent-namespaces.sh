@@ -351,7 +351,11 @@ finish_watcher() {
         status_file="${setup_status_files[${namespace}]}"
         if [[ ! -f "${status_file}" ]]; then
             echo "==> Stopping unfinished agent setup for namespace ${namespace}"
-            cancelled_setups["${namespace}"]=1
+            # Signal the setup to stop, but do NOT mark it as cancelled.
+            # Only cancel_deleting_setups marks cancelled_setups (when the
+            # ClusterOrder or namespace is gone/deleting).  An unfinished
+            # setup stopped by normal workflow shutdown should propagate
+            # failure so incomplete provisioning is not hidden.
             signal_setup "${namespace}"
         fi
     done
