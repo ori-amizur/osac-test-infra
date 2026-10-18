@@ -576,7 +576,7 @@ jobs:
       # Same shared setup e2e-bmaas-full-install uses: applies the cluster-
       # scoped Provisioning CR (watchAllNamespaces) the osac chart's
       # pre-install hook (OSAC-4140) requires, starts sushy-tools, and
-      # creates BareMetalHosts labeled osac.openshift.io/resource_class=ci-worker
+      # creates BareMetalHosts labeled osac.openshift.io/host-type=default
       # that the caas e2e baremetal worker tests allocate. Gated on the value
       # above so non-metal3 CaaS runs are unaffected. teardown.sh removes the
       # VMs, storage pool, and sushy-emulator by CLONE_NAME.
@@ -586,10 +586,9 @@ jobs:
           KUBECONFIG: ${{ runner.temp }}/kubeconfig
           # Must match bmf.metal3.namespace in the caas-ci values / install args.
           BMH_NAMESPACE: host-inventory
-          BMH_RESOURCE_CLASS: ci-worker
           # Peak concurrent demand: test_cluster_create_with_two_node_sets
           # holds two hosts (compute + gpu instance types, both selecting
-          # resource_class=ci-worker) while test_worker_tenant_status holds one on a
+          # host-type=default) while test_worker_tenant_status holds one on a
           # different xdist worker (pytest -n 4 --dist loadfile).
           BMH_COUNT: "3"
         run: bash .github/scripts/setup-virtual-bmh.sh
