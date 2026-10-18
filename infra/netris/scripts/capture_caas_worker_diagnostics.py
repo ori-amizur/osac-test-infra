@@ -54,6 +54,7 @@ MAX_PACKET_LOG_BYTES = 5 * 1024 * 1024
 TCPDUMP_STANDARD_PATHS = ("/usr/sbin/tcpdump", "/sbin/tcpdump", "/usr/bin/tcpdump", "/bin/tcpdump")
 VIRTUAL_MEDIA_MONITOR_TIMEOUT_SECONDS = 2 * 60 * 60
 VIRTUAL_MEDIA_POLL_INTERVAL_SECONDS = 2
+VIRTUAL_MEDIA_EJECT_STAGE = "Rebooting"
 BMC_ADDRESS_RE = re.compile(
     r"^(?:redfish[^+]*\+)?(?P<base>https?://[^/]+/redfish/v1)/Systems/(?P<system>[^/?#]+)"
 )
@@ -603,6 +604,25 @@ def agent_condition(agent: dict[str, Any], condition_type: str) -> str:
     return ""
 
 
+def agent_current_stage(agent: dict[str, Any]) -> str:
+    progress = agent.get("status", {}).get("progress", {})
+    return str(progress.get("currentStage", "")) if isinstance(progress, dict) else ""
+
+
+def agent_reached_stage(agent: dict[str, Any], target_stage: str) -> bool:
+    progress = agent.get("status", {}).get("progress", {})
+    if not isinstance(progress, dict):
+        return False
+    current_stage = str(progress.get("currentStage", ""))
+    stages = progress.get("progressStages", [])
+    if not isinstance(stages, list):
+        return current_stage == target_stage
+    stage_names = [str(stage) for stage in stages]
+    if current_stage not in stage_names or target_stage not in stage_names:
+        return current_stage == target_stage
+    return stage_names.index(current_stage) >= stage_names.index(target_stage)
+
+
 def bmc_endpoints(bmhs: list[dict[str, Any]]) -> dict[str, str]:
     endpoints: dict[str, str] = {}
     for bmh in bmhs:
@@ -650,6 +670,7 @@ def virtual_media_status(
         "agentNamespace": agent_namespace,
         "bmhNamespace": bmh_namespace,
         "patterns": patterns,
+        "triggerStage": VIRTUAL_MEDIA_EJECT_STAGE,
         "ejected": sorted(ejected),
         "installed": sorted(installed),
         "attempts": attempts,
@@ -694,7 +715,7 @@ def virtual_media_monitor(
                         continue
                     if agent_condition(agent, "Installed") == "True":
                         installed.add(hostname)
-                    if hostname in ejected or agent_condition(agent, "Connected") != "True":
+                    if hostname in ejected or not agent_reached_stage(agent, VIRTUAL_MEDIA_EJECT_STAGE):
                         continue
                     if next_attempt.get(hostname, 0) > time.monotonic():
                         continue
@@ -704,6 +725,7 @@ def virtual_media_monitor(
                             {
                                 "host": hostname,
                                 "attemptedAt": utc_now(),
+                                "triggerStage": agent_current_stage(agent),
                                 "succeeded": False,
                                 "message": "No Redfish virtual-media endpoint found for BareMetalHost",
                             }
@@ -715,6 +737,7 @@ def virtual_media_monitor(
                         {
                             "host": hostname,
                             "attemptedAt": utc_now(),
+                            "triggerStage": agent_current_stage(agent),
                             "succeeded": succeeded,
                             "message": message,
                         }
