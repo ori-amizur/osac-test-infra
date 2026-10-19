@@ -181,7 +181,7 @@ cluster_order_worker_bmi_names() {
     expected_worker_count=$(jq '[.spec.nodeRequests[]?.numberOfNodes] | add // 0' <<< "${order_json}")
     jq -r --argjson expected "${expected_worker_count}" '
         .status.workers // []
-        | map(.bareMetalInstance.name // empty)
+        | map(.bareMetalInstance.id // empty | "bmi-" + .)
         | if length == $expected then .[] else empty end
     ' <<< "${order_json}"
 }
