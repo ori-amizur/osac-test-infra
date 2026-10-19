@@ -240,7 +240,6 @@
         core@{{ bmaas_ssh_hosts[item] }} 'bash -s' <<'REMOTE'
       set -euo pipefail
       api_host="{{ _caas_hosted_api_host }}"
-      api_vip="{{ _caas_hosted_api_vip }}"
       proxy_host="{{ caas_hosted_api_proxy_host }}"
       proxy_port="{{ caas_hosted_api_proxy_port }}"
       config=/etc/kubernetes/apiserver-proxy-config/haproxy.cfg
@@ -253,24 +252,29 @@
           "s#^[[:space:]]*server controlplane .*#  server controlplane ${proxy_host}:${proxy_port}#" \
           "$config"
       fi
-      has_api_vip() {
-        ip -4 -o addr show dev lo | awk '{print $4}' | grep -qx "${api_vip}/32"
+      internal_vip="$(sudo awk '$1 == "bind" { split($2, address, ":"); print address[1]; exit }' "$config")"
+      if [ -z "$internal_vip" ]; then
+        echo "HAProxy API bind address is missing on $(hostname)" >&2
+        exit 1
+      fi
+      has_internal_vip() {
+        ip -4 -o addr show dev lo | awk '{print $4}' | grep -qx "${internal_vip}/32"
       }
-      if ! has_api_vip; then
+      if ! has_internal_vip; then
         sudo systemctl restart apiserver-ip.service >/dev/null 2>&1 || true
       fi
-      if ! has_api_vip; then
-        sudo ip addr add "${api_vip}/32" brd "${api_vip}" scope host dev lo
-        sudo ip route replace "${api_vip}/32" dev lo scope link src "${api_vip}"
+      if ! has_internal_vip; then
+        sudo ip addr add "${internal_vip}/32" brd "${internal_vip}" scope host dev lo
+        sudo ip route replace "${internal_vip}/32" dev lo scope link src "${internal_vip}"
       fi
-      if ! has_api_vip; then
-        echo "The hosted API VIP ${api_vip} is not assigned to lo on $(hostname)" >&2
+      if ! has_internal_vip; then
+        echo "The HAProxy API address ${internal_vip} is not assigned to lo on $(hostname)" >&2
         exit 1
       fi
       current_vip="$(awk -v host="$api_host" '$2 == host { print $1; exit }' /etc/hosts)"
-      if [ "$current_vip" != "$api_vip" ]; then
+      if [ "$current_vip" != "$internal_vip" ]; then
         sudo sed -i "/[[:space:]]${api_host}$/d" /etc/hosts
-        echo "${api_vip} ${api_host}" | sudo tee -a /etc/hosts >/dev/null
+        echo "${internal_vip} ${api_host}" | sudo tee -a /etc/hosts >/dev/null
       fi
       sudo pkill -x haproxy >/dev/null 2>&1 || true
       for attempt in $(seq 1 60); do
