@@ -16,8 +16,10 @@
 #   hot-pool          — legacy: agents in hardware-inventory, this script
 #                       labels AND approves them.
 #   cluster-namespace — agents in the ClusterOrder namespace
-#                       (CAAS_CLUSTER_ORDER_NAMESPACE). This script labels
-#                       but does NOT approve — osac ci_create owns approval.
+#                       (CAAS_CLUSTER_ORDER_NAMESPACE). This script boots the
+#                       ClusterOrder's allocated virtual BMHs from its InfraEnv
+#                       discovery ISO. It does NOT label or approve agents —
+#                       osac ci_create owns approval.
 #
 # Required env:
 #   CLONE_NAME   — cluster-tool clone name (used to find the libvirt network)
@@ -29,11 +31,12 @@
 #   CAAS_CLUSTER_ORDER_NAME      — parent ClusterOrder to monitor for deletion
 #   OSAC_NAMESPACE               — OSAC deployment namespace (default: osac-e2e-ci)
 #   OSAC_PULL_SECRET_PATH        — path to pull-secret JSON (default: $RUNNER_TEMP/pull-secret.json)
-#   AGENT_HOST_COUNT             — number of agent VMs to create (default: 2)
-#   AGENT_RESOURCE_CLASS         — resource class label (default: ci-worker)
+#   AGENT_HOST_COUNT             — hot-pool agent VM count (default: 2)
+#   AGENT_RESOURCE_CLASS         — hot-pool resource class label (default: ci-worker)
 #
-# Teardown: teardown.sh cleans up VMs by the "caas-agent-${CLONE_NAME}-"
-# prefix — see the "Clean up CaaS agent VMs" section there.
+# Teardown: teardown.sh cleans up hot-pool VMs by the "caas-agent-${CLONE_NAME}-"
+# prefix — see the "Clean up CaaS agent VMs" section there. Cluster-namespace
+# mode reuses virtual BMHs, which teardown already owns.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -93,6 +96,7 @@ VM_PREFIX="caas-agent-${CLONE_NAME}-${NAMESPACE_HASH}"
 VM_DISK_DIR="/tmp/caas-agent-disks-${CLONE_NAME}/${NAMESPACE_HASH}"
 SSH_PUB_KEY="$(cat ~/.ssh/id_rsa.pub 2>/dev/null || cat ~/.ssh/id_ed25519.pub 2>/dev/null || true)"
 VM_NAMES=()
+BMH_MACS=()
 SETUP_COMPLETED=0
 
 order_is_terminating() {
@@ -166,6 +170,174 @@ stop_if_namespace_terminating() {
     fi
 }
 
+cluster_order_worker_bmi_names() {
+    local order_json expected_worker_count
+    if ! order_json=$(oc get clusterorder "${CAAS_CLUSTER_ORDER_NAME}" \
+        -n "${OSAC_NAMESPACE}" --ignore-not-found -o json 2>/dev/null); then
+        return 1
+    fi
+    [[ -n "${order_json}" ]] || return 1
+
+    expected_worker_count=$(jq '[.spec.nodeRequests[]?.numberOfNodes] | add // 0' <<< "${order_json}")
+    jq -r --argjson expected "${expected_worker_count}" '
+        .status.workers // []
+        | map(.bareMetalInstance.name // empty)
+        | if length == $expected then .[] else empty end
+    ' <<< "${order_json}"
+}
+
+bmi_external_host_id() {
+    local bmi_name="$1" bmi_json external_host_id
+    if ! bmi_json=$(oc get bmi "${bmi_name}" -n "${OSAC_NAMESPACE}" \
+        --ignore-not-found -o json 2>/dev/null); then
+        return 1
+    fi
+    [[ -n "${bmi_json}" ]] || return 1
+
+    external_host_id=$(jq -r '.spec.externalHostID // ""' <<< "${bmi_json}")
+    [[ "${external_host_id}" == */* ]] || return 1
+    printf '%s\n' "${external_host_id}"
+}
+
+redfish_request() {
+    local method="$1" url="$2" body_file="$3" netrc_file="$4" timeout="$5"
+    curl --noproxy '*' --silent --fail-with-body \
+        --connect-timeout 5 --max-time "${timeout}" \
+        --netrc-file "${netrc_file}" \
+        -H 'Content-Type: application/json' \
+        -X "${method}" --data "@${body_file}" \
+        "${url}" >/dev/null 2>/dev/null
+}
+
+boot_allocated_virtual_bmhs() {
+    local worker_bmi_names bmi_name bmi_external_id
+    local bmh_namespace bmh_name bmh_json secret_name secret_json
+    local bmc_address redfish_url bmc_username bmc_password bmc_host boot_mac
+    local netrc_file boot_body_file iso_body_file reset_body_file
+    local elapsed=0
+
+    info "Waiting for ClusterOrder worker BareMetalInstances..."
+    while true; do
+        stop_if_namespace_terminating
+        if worker_bmi_names=$(cluster_order_worker_bmi_names) && [[ -n "${worker_bmi_names}" ]]; then
+            break
+        fi
+        sleep 10
+        elapsed=$((elapsed + 10))
+        if [[ "${elapsed}" -ge 600 ]]; then
+            echo "ERROR: Timed out waiting for ClusterOrder workers after ${elapsed}s" >&2
+            exit 1
+        fi
+    done
+
+    readarray -t worker_bmi_names <<< "${worker_bmi_names}"
+    info "Found ${#worker_bmi_names[@]} allocated worker BareMetalInstances."
+
+    for bmi_name in "${worker_bmi_names[@]}"; do
+        elapsed=0
+        while true; do
+            stop_if_namespace_terminating
+            if bmi_external_id=$(bmi_external_host_id "${bmi_name}") && [[ -n "${bmi_external_id}" ]]; then
+                break
+            fi
+            sleep 10
+            elapsed=$((elapsed + 10))
+            if [[ "${elapsed}" -ge 600 ]]; then
+                echo "ERROR: Timed out waiting for BMI ${bmi_name} host allocation after ${elapsed}s" >&2
+                exit 1
+            fi
+        done
+
+        bmh_namespace="${bmi_external_id%/*}"
+        bmh_name="${bmi_external_id#*/}"
+        if ! bmh_json=$(oc get bmh "${bmh_name}" -n "${bmh_namespace}" -o json 2>/dev/null); then
+            echo "ERROR: Could not read allocated BareMetalHost for BMI ${bmi_name}." >&2
+            exit 1
+        fi
+
+        boot_mac=$(jq -r '.spec.bootMACAddress // ""' <<< "${bmh_json}")
+        BMH_MACS+=("${boot_mac}")
+        bmc_address=$(jq -r '.spec.bmc.address // ""' <<< "${bmh_json}")
+        secret_name=$(jq -r '.spec.bmc.credentialsName // ""' <<< "${bmh_json}")
+        redfish_url="${bmc_address#redfish-virtualmedia+}"
+        if [[ -z "${boot_mac}" || -z "${secret_name}" ]] ||
+            [[ "${redfish_url}" != http://* && "${redfish_url}" != https://* ]]; then
+            echo "ERROR: BMI ${bmi_name} does not resolve to a bootable virtual BMH." >&2
+            exit 1
+        fi
+        if ! secret_json=$(oc get secret "${secret_name}" -n "${bmh_namespace}" -o json 2>/dev/null); then
+            echo "ERROR: Could not read BMC secret for BareMetalHost ${bmh_name}." >&2
+            exit 1
+        fi
+
+        bmc_username=$(jq -r '.data.username // .stringData.username // ""' <<< "${secret_json}" | tr -d '\n')
+        bmc_password=$(jq -r '.data.password // .stringData.password // ""' <<< "${secret_json}" | tr -d '\n')
+        if [[ -z "${bmc_username}" || -z "${bmc_password}" ]]; then
+            echo "ERROR: BareMetalHost ${bmh_name} BMC secret is incomplete." >&2
+            exit 1
+        fi
+
+        netrc_file=$(mktemp "${RUNNER_TEMP:-/tmp}/caas-bmc-netrc.XXXXXX")
+        boot_body_file=$(mktemp "${RUNNER_TEMP:-/tmp}/caas-redfish-boot.XXXXXX")
+        iso_body_file=$(mktemp "${RUNNER_TEMP:-/tmp}/caas-redfish-iso.XXXXXX")
+        reset_body_file=$(mktemp "${RUNNER_TEMP:-/tmp}/caas-redfish-reset.XXXXXX")
+        chmod 600 "${netrc_file}" "${boot_body_file}" "${iso_body_file}" "${reset_body_file}"
+
+        bmc_host=$(printf '%s\n' "${redfish_url}" | sed -E 's|^https?://||; s|[:/].*||')
+        printf 'machine %s login %s password %s\n' \
+            "${bmc_host}" "${bmc_username}" "${bmc_password}" > "${netrc_file}"
+        printf '%s\n' '{"Boot":{"BootSourceOverrideTarget":"Cd"}}' > "${boot_body_file}"
+        jq -n --arg image "${ISO_URL}" \
+            '{Image:$image,Inserted:true,WriteProtected:true}' > "${iso_body_file}"
+        printf '%s\n' '{"ResetType":"ForceRestart"}' > "${reset_body_file}"
+
+        info "Booting allocated BareMetalHost ${bmh_name} from the discovery ISO..."
+        if ! redfish_request PATCH "${redfish_url}" "${boot_body_file}" "${netrc_file}" 15 ||
+            ! redfish_request POST "${redfish_url}/VirtualMedia/CD/Actions/VirtualMedia.InsertMedia" \
+                "${iso_body_file}" "${netrc_file}" 600 ||
+            ! redfish_request POST "${redfish_url}/Actions/ComputerSystem.Reset" \
+                "${reset_body_file}" "${netrc_file}" 15; then
+            echo "ERROR: Failed to boot BareMetalHost ${bmh_name} through Redfish." >&2
+            rm -f "${netrc_file}" "${boot_body_file}" "${iso_body_file}" "${reset_body_file}"
+            exit 1
+        fi
+        rm -f "${netrc_file}" "${boot_body_file}" "${iso_body_file}" "${reset_body_file}"
+    done
+}
+
+wait_for_cluster_namespace_agents() {
+    local agents_json matched elapsed=0 index
+    info "Waiting for ${#BMH_MACS[@]} Agents from the allocated virtual BMHs..."
+    while true; do
+        stop_if_namespace_terminating
+        matched=0
+        if agents_json=$(oc get agent -n "${AGENT_NAMESPACE}" \
+            -l "infraenvs.agent-install.openshift.io=${INFRAENV_NAME}" -o json 2>/dev/null); then
+            for index in "${!BMH_MACS[@]}"; do
+                if [[ "$(jq --arg mac "${BMH_MACS[$index]}" '
+                    [.items[] | select(
+                        ([.status.inventory.interfaces[]?.macAddress] |
+                            map(ascii_downcase) |
+                            index(($mac | ascii_downcase))) != null
+                    )] | length
+                ' <<< "${agents_json}")" -ge 1 ]]; then
+                    matched=$((matched + 1))
+                fi
+            done
+        fi
+        [[ "${matched}" -eq "${#BMH_MACS[@]}" ]] && break
+
+        sleep 30
+        elapsed=$((elapsed + 30))
+        echo "  ${elapsed}s elapsed — ${matched}/${#BMH_MACS[@]} allocated BMH agents registered"
+        if [[ "${elapsed}" -ge 900 ]]; then
+            echo "ERROR: Timed out waiting for allocated BMH agents after ${elapsed}s" >&2
+            exit 1
+        fi
+    done
+    info "All ${#BMH_MACS[@]} allocated BMH agents registered"
+}
+
 # ---------- create the agent namespace resources and InfraEnv ----------
 
 info "Creating pull-secret in ${AGENT_NAMESPACE}..."
@@ -216,6 +388,16 @@ while true; do
 done
 # Log readiness without exposing the signed URL.
 info "Discovery ISO URL ready"
+
+# Cluster-namespace mode must reuse the BMHs allocated to the ClusterOrder so
+# Agent inventory MACs match the BareMetalInstance hardware inventory.
+if [[ "${CAAS_AGENT_FLOW}" == "cluster-namespace" ]]; then
+    boot_allocated_virtual_bmhs
+    wait_for_cluster_namespace_agents
+    SETUP_COMPLETED=1
+    info "setup-caas-agents complete (agent_flow=${CAAS_AGENT_FLOW})."
+    exit 0
+fi
 
 # ---------- step 3: discover cluster-tool network and boot VMs ----------
 
