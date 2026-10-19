@@ -656,6 +656,39 @@ def eject_virtual_media(endpoint: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def libvirt_cdrom_target(vm_name: str) -> str:
+    result = run_command(["virsh", "dumpxml", vm_name], timeout=30)
+    if result is None or result.returncode != 0:
+        return ""
+    try:
+        domain = ElementTree.fromstring(result.stdout)
+    except ElementTree.ParseError:
+        return ""
+    for disk in domain.findall("./devices/disk"):
+        if disk.get("device") != "cdrom":
+            continue
+        target = disk.find("target")
+        if target is not None and target.get("dev"):
+            return str(target.get("dev"))
+    return ""
+
+
+def eject_live_virtual_media(vm_name: str) -> tuple[bool, str]:
+    target = libvirt_cdrom_target(vm_name)
+    if not target:
+        return False, "No libvirt CD-ROM target found"
+    result = run_command(
+        ["virsh", "change-media", vm_name, target, "--eject", "--live", "--force"],
+        timeout=30,
+    )
+    if result is None:
+        return False, "virsh change-media timed out"
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        return False, message
+    return True, f"ejected live media from {target}"
+
+
 def virtual_media_status(
     agent_namespace: str,
     bmh_namespace: str,
@@ -732,12 +765,17 @@ def virtual_media_monitor(
                         )
                         next_attempt[hostname] = time.monotonic() + 30
                         continue
-                    succeeded, message = eject_virtual_media(endpoint)
+                    redfish_succeeded, redfish_message = eject_virtual_media(endpoint)
+                    live_succeeded, live_message = eject_live_virtual_media(hostname)
+                    succeeded = redfish_succeeded and live_succeeded
+                    message = f"Redfish: {redfish_message}; libvirt: {live_message}"
                     attempts.append(
                         {
                             "host": hostname,
                             "attemptedAt": utc_now(),
                             "triggerStage": agent_current_stage(agent),
+                            "redfishSucceeded": redfish_succeeded,
+                            "liveSucceeded": live_succeeded,
                             "succeeded": succeeded,
                             "message": message,
                         }
