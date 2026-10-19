@@ -51,6 +51,9 @@ AGENT_HOST_COUNT="${AGENT_HOST_COUNT:-2}"
 AGENT_RESOURCE_CLASS="${AGENT_RESOURCE_CLASS:-ci-worker}"
 CAAS_CLUSTER_ORDER_NAME="${CAAS_CLUSTER_ORDER_NAME:-}"
 INFRAENV_NAME="infraenv"
+if [[ "${CAAS_AGENT_FLOW}" == "cluster-namespace" && -n "${CAAS_CLUSTER_ORDER_NAME}" ]]; then
+    INFRAENV_NAME="${CAAS_CLUSTER_ORDER_NAME}-infraenv"
+fi
 
 VIRSH="virsh -c qemu:///system"
 CT_NETWORK="test-infra-net-${CLONE_NAME}"
