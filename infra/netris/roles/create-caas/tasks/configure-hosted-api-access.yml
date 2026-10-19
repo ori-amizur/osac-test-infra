@@ -272,18 +272,14 @@
         sudo sed -i "/[[:space:]]${api_host}$/d" /etc/hosts
         echo "${api_vip} ${api_host}" | sudo tee -a /etc/hosts >/dev/null
       fi
-      pod="$(sudo crictl pods -q --name kube-apiserver-proxy | head -1 || true)"
-      if [ -n "$pod" ]; then
-        sudo crictl stopp "$pod" >/dev/null 2>&1 || true
-      fi
-      sudo systemctl restart kubelet
-      for attempt in $(seq 1 30); do
+      sudo pkill -x haproxy >/dev/null 2>&1 || true
+      for attempt in $(seq 1 60); do
         status="$(curl -k -sS --connect-timeout 5 -o /dev/null -w '%{http_code}' \
           "https://${api_host}:6443/readyz" || true)"
         if [ "$status" = 200 ]; then
           exit 0
         fi
-        sleep 2
+        sleep 5
       done
       echo "CaaS worker $(hostname) could not reach the hosted API" >&2
       exit 1
