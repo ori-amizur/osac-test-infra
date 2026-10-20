@@ -123,7 +123,7 @@ caas_cluster_release_version: "{{ ocp_version }}.0"
 caas_cluster_version: "{{ caas_cluster_release_version }}-rhcos"
 caas_cluster_release_image: "quay.io/openshift-release-dev/ocp-release:{{ caas_cluster_release_version }}-multi"
 caas_cluster_disk_image_name: "rhcos-{{ ocp_version | replace('.', '-') }}"
-caas_cluster_disk_image_source_ref: "oci://quay.io/rh_ee_rpiccoli/rhcos-bmi:{{ caas_cluster_release_version }}"
+caas_cluster_disk_image_source_ref: "oci://quay.io/osac-project/rhcos:{{ caas_cluster_release_version }}"
 
 # CaaS worker VM names and sizing. The direct CaaS path prepares these VMs but
 # leaves them powered off until OSAC provisions their BareMetalInstances with
