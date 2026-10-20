@@ -533,7 +533,7 @@ that pull secret to Skopeo when it downloads the flavor image.
 | `caas_cluster_release_version` | `4.22.0` | OCP release version used to build the ClusterVersion release image and RHCOS DiskImage source | defaults only |
 | `caas_cluster_release_image` | `quay.io/openshift-release-dev/ocp-release:4.22.0-multi` | OpenShift release payload for the CaaS ClusterVersion | defaults only |
 | `caas_cluster_disk_image_name` | `rhcos-4-22` | RHCOS DiskImage ensured by `setup-caas` | defaults only |
-| `caas_cluster_disk_image_source_ref` | `oci://quay.io/rh_ee_rpiccoli/rhcos-bmi:4.22.0` | RHCOS BMI image source | defaults only |
+| `caas_cluster_disk_image_source_ref` | `oci://quay.io/osac-project/rhcos:4.22.0` | RHCOS BMI image source | defaults only |
 | `caas_use_order_infraenv_for_worker_boot` | `true` | CaaS skips the shared discovery ISO and waits for OSAC's ClusterOrder InfraEnv; `setup-maas` sets this to `false` | defaults only |
 | `caas_discovery_infraenv_namespace` | `hardware-inventory` | Shared discovery namespace used by the legacy MaaS setup | defaults only |
 | `caas_agent_namespace` | workload tenant for direct CaaS; `hardware-inventory` for MaaS | Namespace used for Agent diagnostics and legacy discovery cleanup | defaults only |
