@@ -198,6 +198,10 @@
       --overwrite
   environment:
     KUBECONFIG: /root/.kube/config
+  register: _cp_namespace_label
+  until: _cp_namespace_label.rc == 0
+  retries: 10
+  delay: 15
   changed_when: true
 
 - name: Also label the HostedCluster namespace with privileged PodSecurity
@@ -213,6 +217,12 @@
   environment:
     KUBECONFIG: /root/.kube/config
   changed_when: false
+
+- name: Configure CaaS worker hosted API access
+  ansible.builtin.include_tasks: configure-hosted-api-access.yml
+  when:
+    - caas_hosted_api_proxy_enabled | default(true) | bool
+    - caas_use_order_infraenv_for_worker_boot | default(true) | bool
 
 - name: Require a ready CaaS cluster
   block:

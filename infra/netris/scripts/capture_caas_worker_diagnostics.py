@@ -14,6 +14,8 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -50,6 +52,12 @@ SENSITIVE_KEY_PARTS = (
 MAX_SERIAL_LOG_BYTES = 20 * 1024 * 1024
 MAX_PACKET_LOG_BYTES = 5 * 1024 * 1024
 TCPDUMP_STANDARD_PATHS = ("/usr/sbin/tcpdump", "/sbin/tcpdump", "/usr/bin/tcpdump", "/bin/tcpdump")
+VIRTUAL_MEDIA_MONITOR_TIMEOUT_SECONDS = 2 * 60 * 60
+VIRTUAL_MEDIA_POLL_INTERVAL_SECONDS = 2
+VIRTUAL_MEDIA_EJECT_STAGE = "Rebooting"
+BMC_ADDRESS_RE = re.compile(
+    r"^(?:redfish[^+]*\+)?(?P<base>https?://[^/]+/redfish/v1)/Systems/(?P<system>[^/?#]+)"
+)
 
 
 def utc_now() -> str:
@@ -148,6 +156,14 @@ def packet_capture_matches(pid: int, interface: str) -> bool:
     except OSError:
         return False
     return b"tcpdump" in command and b"-i" in command and interface.encode() in command
+
+
+def virtual_media_monitor_matches(pid: int) -> bool:
+    try:
+        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ")
+    except OSError:
+        return False
+    return b"capture_caas_worker_diagnostics.py" in command and b"monitor" in command
 
 
 def pid_is_running(pid: int) -> bool:
@@ -570,6 +586,316 @@ def stop_packet_capture(output_dir: Path) -> list[dict[str, str]]:
 
     write_json(capture_dir / "capture-stop.json", {"capturedAt": utc_now(), "captures": results})
     return results
+
+
+def agent_hostname(agent: dict[str, Any]) -> str:
+    inventory = agent.get("status", {}).get("inventory", {})
+    hostname = inventory.get("hostname", "") if isinstance(inventory, dict) else ""
+    return str(hostname)
+
+
+def agent_condition(agent: dict[str, Any], condition_type: str) -> str:
+    conditions = agent.get("status", {}).get("conditions", [])
+    if not isinstance(conditions, list):
+        return ""
+    for condition in conditions:
+        if isinstance(condition, dict) and condition.get("type") == condition_type:
+            return str(condition.get("status", ""))
+    return ""
+
+
+def agent_current_stage(agent: dict[str, Any]) -> str:
+    progress = agent.get("status", {}).get("progress", {})
+    return str(progress.get("currentStage", "")) if isinstance(progress, dict) else ""
+
+
+def agent_reached_stage(agent: dict[str, Any], target_stage: str) -> bool:
+    progress = agent.get("status", {}).get("progress", {})
+    if not isinstance(progress, dict):
+        return False
+    current_stage = str(progress.get("currentStage", ""))
+    stages = progress.get("progressStages", [])
+    if not isinstance(stages, list):
+        return current_stage == target_stage
+    stage_names = [str(stage) for stage in stages]
+    if current_stage not in stage_names or target_stage not in stage_names:
+        return current_stage == target_stage
+    return stage_names.index(current_stage) >= stage_names.index(target_stage)
+
+
+def bmc_endpoints(bmhs: list[dict[str, Any]]) -> dict[str, str]:
+    endpoints: dict[str, str] = {}
+    for bmh in bmhs:
+        metadata = bmh.get("metadata", {})
+        address = bmh.get("spec", {}).get("bmc", {}).get("address", "")
+        name = metadata.get("name", "") if isinstance(metadata, dict) else ""
+        match = BMC_ADDRESS_RE.match(str(address))
+        if name and match:
+            endpoints[str(name)] = (
+                f"{match.group('base')}/Systems/{match.group('system')}"
+                "/VirtualMedia/Cd/Actions/VirtualMedia.EjectMedia"
+            )
+    return endpoints
+
+
+def eject_virtual_media(endpoint: str) -> tuple[bool, str]:
+    request = urllib.request.Request(
+        endpoint,
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response.read()
+            return response.status in (200, 202, 204), f"HTTP {response.status}"
+    except urllib.error.HTTPError as exc:
+        message = exc.read().decode("utf-8", errors="replace").strip()
+        return False, f"HTTP {exc.code}: {message}"
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return False, str(exc)
+
+
+def libvirt_cdrom_target(vm_name: str) -> str:
+    result = run_command(["virsh", "dumpxml", vm_name], timeout=30)
+    if result is None or result.returncode != 0:
+        return ""
+    try:
+        domain = ElementTree.fromstring(result.stdout)
+    except ElementTree.ParseError:
+        return ""
+    for disk in domain.findall("./devices/disk"):
+        if disk.get("device") != "cdrom":
+            continue
+        target = disk.find("target")
+        if target is not None and target.get("dev"):
+            return str(target.get("dev"))
+    return ""
+
+
+def eject_live_virtual_media(vm_name: str) -> tuple[bool, str]:
+    target = libvirt_cdrom_target(vm_name)
+    if not target:
+        return False, "No libvirt CD-ROM target found"
+    result = run_command(
+        ["virsh", "change-media", vm_name, target, "--eject", "--live", "--force"],
+        timeout=30,
+    )
+    if result is None:
+        return False, "virsh change-media timed out"
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        return False, message
+    return True, f"ejected live media from {target}"
+
+
+def virtual_media_status(
+    agent_namespace: str,
+    bmh_namespace: str,
+    patterns: list[str],
+    ejected: set[str],
+    installed: set[str],
+    attempts: list[dict[str, Any]],
+    errors: list[str],
+) -> dict[str, Any]:
+    return {
+        "capturedAt": utc_now(),
+        "agentNamespace": agent_namespace,
+        "bmhNamespace": bmh_namespace,
+        "patterns": patterns,
+        "triggerStage": VIRTUAL_MEDIA_EJECT_STAGE,
+        "ejected": sorted(ejected),
+        "installed": sorted(installed),
+        "attempts": attempts,
+        "errors": errors,
+    }
+
+
+def virtual_media_monitor(
+    output_dir: Path,
+    agent_namespace: str,
+    bmh_namespace: str,
+    patterns: list[str],
+) -> int:
+    monitor_dir = output_dir / "virtual-media"
+    monitor_dir.mkdir(parents=True, exist_ok=True)
+    compiled, pattern_errors = compile_patterns(patterns)
+    ejected: set[str] = set()
+    installed: set[str] = set()
+    attempts: list[dict[str, Any]] = []
+    errors: list[str] = list(pattern_errors)
+    next_attempt: dict[str, float] = {}
+    deadline = time.monotonic() + VIRTUAL_MEDIA_MONITOR_TIMEOUT_SECONDS
+
+    while time.monotonic() < deadline:
+        agents_result = run_command(
+            ["oc", "get", "agents.agent-install.openshift.io", "-n", agent_namespace, "-o", "json"],
+            timeout=30,
+        )
+        bmhs_result = run_command(["oc", "get", "bmh", "-n", bmh_namespace, "-o", "json"], timeout=30)
+        if agents_result is None or bmhs_result is None:
+            errors.append("oc get for Agents or BareMetalHosts failed or timed out")
+        else:
+            try:
+                agents_data = json.loads(agents_result.stdout)
+                bmhs_data = json.loads(bmhs_result.stdout)
+                agents = agents_data.get("items", []) if isinstance(agents_data, dict) else []
+                bmhs = bmhs_data.get("items", []) if isinstance(bmhs_data, dict) else []
+                endpoints = bmc_endpoints(bmhs if isinstance(bmhs, list) else [])
+                for agent in agents if isinstance(agents, list) else []:
+                    hostname = agent_hostname(agent)
+                    if not hostname or not any(pattern.search(hostname) for pattern in compiled):
+                        continue
+                    if agent_condition(agent, "Installed") == "True":
+                        installed.add(hostname)
+                    if hostname in ejected or not agent_reached_stage(agent, VIRTUAL_MEDIA_EJECT_STAGE):
+                        continue
+                    if next_attempt.get(hostname, 0) > time.monotonic():
+                        continue
+                    endpoint = endpoints.get(hostname)
+                    if not endpoint:
+                        attempts.append(
+                            {
+                                "host": hostname,
+                                "attemptedAt": utc_now(),
+                                "triggerStage": agent_current_stage(agent),
+                                "succeeded": False,
+                                "message": "No Redfish virtual-media endpoint found for BareMetalHost",
+                            }
+                        )
+                        next_attempt[hostname] = time.monotonic() + 30
+                        continue
+                    redfish_succeeded, redfish_message = eject_virtual_media(endpoint)
+                    live_succeeded, live_message = eject_live_virtual_media(hostname)
+                    succeeded = redfish_succeeded and live_succeeded
+                    message = f"Redfish: {redfish_message}; libvirt: {live_message}"
+                    attempts.append(
+                        {
+                            "host": hostname,
+                            "attemptedAt": utc_now(),
+                            "triggerStage": agent_current_stage(agent),
+                            "redfishSucceeded": redfish_succeeded,
+                            "liveSucceeded": live_succeeded,
+                            "succeeded": succeeded,
+                            "message": message,
+                        }
+                    )
+                    if succeeded:
+                        ejected.add(hostname)
+                    else:
+                        next_attempt[hostname] = time.monotonic() + 30
+            except json.JSONDecodeError as exc:
+                errors.append(f"Agent or BareMetalHost JSON was invalid: {exc}")
+
+        write_json(
+            monitor_dir / "eject-status.json",
+            virtual_media_status(
+                agent_namespace, bmh_namespace, patterns, ejected, installed, attempts, errors
+            ),
+        )
+        expected = {
+            name
+            for name in ejected
+            if any(pattern.search(name) for pattern in compiled)
+        }
+        if installed and installed >= expected:
+            return 0
+        time.sleep(VIRTUAL_MEDIA_POLL_INTERVAL_SECONDS)
+
+    errors.append("Virtual-media monitor timed out")
+    write_json(
+        monitor_dir / "eject-status.json",
+        virtual_media_status(
+            agent_namespace, bmh_namespace, patterns, ejected, installed, attempts, errors
+        ),
+    )
+    return 0
+
+
+def start_virtual_media_monitor(
+    output_dir: Path,
+    namespace: str,
+    agent_namespace: str,
+    bmh_namespace: str,
+    patterns: list[str],
+) -> dict[str, Any]:
+    monitor_dir = output_dir / "virtual-media"
+    monitor_dir.mkdir(parents=True, exist_ok=True)
+    pid_file = monitor_dir / "eject-monitor.pid"
+    log_file = monitor_dir / "eject-monitor.log"
+    if pid_file.exists():
+        try:
+            existing_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            existing_pid = -1
+        if existing_pid > 0 and virtual_media_monitor_matches(existing_pid):
+            return {"state": "already monitoring", "pid": str(existing_pid)}
+        pid_file.unlink(missing_ok=True)
+
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "monitor",
+        "--output-dir",
+        str(output_dir),
+        "--namespace",
+        namespace,
+        "--agent-namespace",
+        agent_namespace,
+        "--bmh-namespace",
+        bmh_namespace,
+        "--vm-patterns-json",
+        json.dumps(patterns),
+    ]
+    try:
+        with log_file.open("wb") as log_stream:
+            log_stream.write(f"Virtual-media eject monitor started {utc_now()}\n".encode())
+            log_stream.flush()
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log_stream,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+        pid_file.write_text(f"{process.pid}\n", encoding="ascii")
+        pid_file.chmod(0o600)
+        time.sleep(0.5)
+        return_code = process.poll()
+        if return_code is not None:
+            pid_file.unlink(missing_ok=True)
+            return {"state": f"monitor exited immediately ({return_code})"}
+        return {"state": "monitoring", "pid": str(process.pid)}
+    except OSError as exc:
+        return {"state": f"not started: {exc}"}
+
+
+def stop_virtual_media_monitor(output_dir: Path) -> dict[str, str]:
+    monitor_dir = output_dir / "virtual-media"
+    monitor_dir.mkdir(parents=True, exist_ok=True)
+    pid_file = monitor_dir / "eject-monitor.pid"
+    if not pid_file.exists():
+        return {"state": "not running"}
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pid_file.unlink(missing_ok=True)
+        return {"state": "removed invalid pid file"}
+    if not virtual_media_monitor_matches(pid):
+        pid_file.unlink(missing_ok=True)
+        return {"state": "monitor already stopped or changed"}
+    with suppress(ProcessLookupError, OSError):
+        os.killpg(pid, signal.SIGTERM)
+    for _ in range(50):
+        if not pid_is_running(pid):
+            break
+        time.sleep(0.1)
+    if pid_is_running(pid) and virtual_media_monitor_matches(pid):
+        with suppress(ProcessLookupError, OSError):
+            os.killpg(pid, signal.SIGKILL)
+    pid_file.unlink(missing_ok=True)
+    return {"state": "stopped"}
 
 
 def trim_and_redact_packet_logs(capture_dir: Path) -> None:
@@ -1019,7 +1345,7 @@ def capture_kubernetes_snapshot(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("start", "collect"))
+    parser.add_argument("action", choices=("start", "collect", "monitor"))
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--agent-namespace", "--discovery-namespace", dest="agent_namespace", required=True)
@@ -1028,6 +1354,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vm-patterns-json", required=True)
     parser.add_argument("--management-bridge", default="br-mgmt")
     parser.add_argument("--bmc-network", default="bmc-net")
+    parser.add_argument("--eject-virtual-media", choices=("true", "false"), default="false")
     return parser.parse_args()
 
 
@@ -1045,10 +1372,27 @@ def main() -> int:
     if args.action == "start":
         start_serial_capture(args.output_dir, patterns)
         start_packet_capture(args.output_dir, patterns, args.management_bridge, args.bmc_network)
+        if args.eject_virtual_media == "true":
+            monitor_status = start_virtual_media_monitor(
+                args.output_dir, args.namespace, args.agent_namespace, args.bmh_namespace, patterns
+            )
+            write_json(
+                args.output_dir / "virtual-media" / "eject-start.json",
+                {"capturedAt": utc_now(), "monitor": monitor_status},
+            )
         return 0
+
+    if args.action == "monitor":
+        return virtual_media_monitor(
+            args.output_dir, args.agent_namespace, args.bmh_namespace, patterns
+        )
 
     stop_serial_capture(args.output_dir)
     stop_packet_capture(args.output_dir)
+    write_json(
+        args.output_dir / "virtual-media" / "eject-stop.json",
+        {"capturedAt": utc_now(), "monitor": stop_virtual_media_monitor(args.output_dir)},
+    )
     console_dir = args.output_dir / "worker-consoles"
     trim_and_redact_serial_logs(console_dir)
     trim_and_redact_packet_logs(args.output_dir / "network-captures")
